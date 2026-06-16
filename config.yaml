@@ -1,0 +1,26 @@
+# Ichibot configuration
+
+trading:
+  markets: ["BTC", "ETH", "SOL", "HYPE"]  # Hyperliquid perp symbols to scan
+  timeframe: "1d"                         # daily candles only (only value supported)
+  max_leverage: 1                         # hard-capped at 1x by config validation
+  only_completed_candles: true            # ignore the still-forming daily candle
+
+
+# Doubled ichi settings (less noise than classic 9/26/52/26)
+
+ichimoku:
+  conversion_periods: 20                  # Tenkan-sen 
+  base_periods: 60                        # Kijun-sen
+  span_b_periods: 120                     # Senkou Span B 
+  displacement: 30                        # cloud forward shift
+
+risk: 
+  account_equity_usd: 1000.0              # equity assumed for sizing (dry-run)
+  max_capital_per_trade_frac: 0.10        # <= 10% of equity per single trade 
+  max_portfolio_exposure_frac: 0.50       # <- 50% of equity deployed at once
+  stop_loss_frac: 0.05                    # exit if 5% below entry
+  take_profit_frac: 0.15                  # take profit at +15% (0 disables)
+  use_trailing_stop: false 
+  trailing_stop_frac: 0.07
+  min_signal_confidence: 0.6              # 0..1: ignore weaker signals
