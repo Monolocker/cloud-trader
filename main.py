@@ -1,7 +1,8 @@
 """Entry point. 
 
 Milestone 1: load + validate config, init logging, print mode banner.
-Milestone 2: fetch completed candle for each configured market (read-only)
+Milestone 2: fetch completed daily candles for each configured market (read-only)
+Milestone 3: compute ichimoku cloud and log where price sits vs. cloud
 
 No trading logic exists yet. Will arrive in later milestones. Places no orders atm  
 """
@@ -11,6 +12,7 @@ from __future__ import annotations
 import sys
 
 from ichibot.config import ConfigError, load_config
+from ichibot.ichimoku import cloud_position, compute_ichimoku, min_required_candles 
 from ichibot.logging_setup import setup_logging
 from ichibot.market_data import HyperliquidData, MarketDataError
 
@@ -30,14 +32,12 @@ def main() -> int:
     if cfg.enable_live_trading:
         log.warning("!" * 60)
         log.warning("LIVE TRADING IS ENABLED. Real orders could be placed.")
-        log.warning("(No trading logic exists yet — nothing will trade.)")
+        log.warning("(No trading logic exists yet -- nothing will trade.)")
         log.warning("!" * 60)
     else:
         log.info("Mode: DRY RUN. No real orders will ever be placed.")
 
     log.info("Config summary: %s", cfg.summary())
-
-    # Milestone 2: read-only market data 
 
     try:
         data = HyperliquidData()
@@ -46,8 +46,13 @@ def main() -> int:
         log.error("Check your internet connection and try again. Exiting.")
         return 1
 
-    log.info("Fetching completed daily candles for %d market(s)...", len(cfg.trading.markets))
-    fetched = 0
+    # Milestone 3: Ichimoku computation
+
+    needed = min_required_candles(cfg.ichimoku.span_b_periods, cfg.ichimoku.displacement)
+    log.info("Scanning %d market(s); need >= %d candles per market for a full cloud.",
+             len(cfg.trading.markets), needed)
+
+    analyzed = 0
     for coin in cfg.trading.markets:
         try:
             df = data.fetch_daily(
@@ -59,22 +64,33 @@ def main() -> int:
             log.warning("Skipping %s: %s", coin, exc)
             continue
 
-        if df.empty:
-            log.warning("%s: no candle data returned", coin)
+        if len(df) < needed:
+            log.warning("%s: only %d candles, need %d -- skipping (market too new?)",
+                        coin, len(df), needed)
             continue
 
-        last = df.iloc[-1]
-        log.info(
-            "%-6s | %4d candles | latest completed %s | close=%.4f",
-            coin, len(df), last["time"].date(), last["close"],
+        ich = compute_ichimoku(
+            df,
+            conversion_periods=cfg.ichimoku.conversion_periods,
+            base_periods=cfg.ichimoku.base_periods,
+            span_b_periods=cfg.ichimoku.span_b_periods,
+            displacement=cfg.ichimoku.displacement,
         )
-        fetched += 1
+        last = ich.iloc[-1]
+        log.info(
+            "%-6s | %s close=%.4f | tenkan=%.4f kijun=%.4f | cloud=[%.4f, %.4f] | %s",
+            coin, last["time"].date(), last["close"], last["tenkan"], last["kijun"],
+            last["cloud_bottom"], last["cloud_top"], cloud_position(last),
+        )
+        analyzed += 1
 
-    log.info("Milestone 2 OK: fetched data for %d/%d markets.", fetched, len(cfg.trading.markets))
+    log.info("Milestone 3 OK: computed Ichimoku for %d/%d markets.",
+             analyzed, len(cfg.trading.markets))
     log.info("=" * 60)
-    return 0 if fetched > 0 else 1
+    return 0 if analyzed > 0 else 1
 
 
 if __name__ == "__main__":
     sys.exit(main())
+
 
