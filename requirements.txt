@@ -1,0 +1,8 @@
+# Core dependencies
+python-dotenv>=1.0.0
+PyYAML>=6.0
+pandas>=2.0
+hyperliquid-python-sdk>=0.23.0
+
+# Development / testing
+pytest>=8.0
