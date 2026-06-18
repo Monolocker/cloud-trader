@@ -3,8 +3,9 @@
 Milestone 1: load + validate config, init logging, print mode banner.
 Milestone 2: fetch completed daily candles for each configured market (read-only)
 Milestone 3: compute ichimoku cloud and log where price sits vs. cloud
+Milestone 4a: evaluate the five core signals on the latest candle + a history scan
 
-No trading logic exists yet. Will arrive in later milestones. Places no orders atm  
+No trading logic exists yet. Entry/exit are only assessed and logged. Places no orders atm
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from ichibot.config import ConfigError, load_config
 from ichibot.ichimoku import cloud_position, compute_ichimoku, min_required_candles 
 from ichibot.logging_setup import setup_logging
 from ichibot.market_data import HyperliquidData, MarketDataError
+from ichibot.signals import ALL_SIGNALS, evaluate_signals, signals_per_row
 
 
 def main() -> int:
@@ -46,10 +48,8 @@ def main() -> int:
         log.error("Check your internet connection and try again. Exiting.")
         return 1
 
-    # Milestone 3: Ichimoku computation
-
     needed = min_required_candles(cfg.ichimoku.span_b_periods, cfg.ichimoku.displacement)
-    log.info("Scanning %d market(s); need >= %d candles per market for a full cloud.",
+    log.info("Scanning %d market(s); need >= %d candles per market.",
              len(cfg.trading.markets), needed)
 
     analyzed = 0
@@ -65,8 +65,7 @@ def main() -> int:
             continue
 
         if len(df) < needed:
-            log.warning("%s: only %d candles, need %d -- skipping (market too new?)",
-                        coin, len(df), needed)
+            log.warning("%s: only %d candles, need %d -- skipping.", coin, len(df), needed)
             continue
 
         ich = compute_ichimoku(
@@ -77,14 +76,20 @@ def main() -> int:
             displacement=cfg.ichimoku.displacement,
         )
         last = ich.iloc[-1]
-        log.info(
-            "%-6s | %s close=%.4f | tenkan=%.4f kijun=%.4f | cloud=[%.4f, %.4f] | %s",
-            coin, last["time"].date(), last["close"], last["tenkan"], last["kijun"],
-            last["cloud_bottom"], last["cloud_top"], cloud_position(last),
-        )
+        result = evaluate_signals(ich, cfg.risk.min_signal_confidence)
+
+        log.info("%-6s | %s close=%.4f | %s | %s",
+                 coin, last["time"].date(), last["close"], cloud_position(last),
+                 result.summary())
+
+        # History scan: how often each signal fired across the available candles.
+        flags = signals_per_row(ich)
+        hist = " ".join(f"{name}={int(flags[name].sum())}" for name in ALL_SIGNALS)
+        log.info("         %s history over %d candles: %s", coin, len(ich), hist)
+
         analyzed += 1
 
-    log.info("Milestone 3 OK: computed Ichimoku for %d/%d markets.",
+    log.info("Milestone 4a OK: evaluated signals for %d/%d markets.",
              analyzed, len(cfg.trading.markets))
     log.info("=" * 60)
     return 0 if analyzed > 0 else 1
@@ -92,5 +97,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
 
