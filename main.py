@@ -4,8 +4,10 @@ Milestone 1: load + validate config, init logging, print mode banner.
 Milestone 2: fetch completed daily candles for each configured market (read-only)
 Milestone 3: compute ichimoku cloud and log where price sits vs. cloud
 Milestone 4a: evaluate the five core signals on the latest candle + a history scan
+Milestone 4b: extend signals to include c-clamp, flat kijun, etc
+Milestone 5: turn entry recommendations into respectively sized, risk-checked decisions 
 
-No trading logic exists yet. Entry/exit are only assessed and logged. Places no orders atm
+Entries/exits are only assessed, sized and logged only. Places no orders atm
 """
 
 from __future__ import annotations
@@ -16,7 +18,9 @@ from ichibot.config import ConfigError, load_config
 from ichibot.ichimoku import cloud_position, compute_ichimoku, min_required_candles 
 from ichibot.logging_setup import setup_logging
 from ichibot.market_data import HyperliquidData, MarketDataError
+from ichibot.risk import RiskManager
 from ichibot.signals import ALL_SIGNALS, evaluate_signals, signals_per_row
+
 
 
 def main() -> int:
@@ -41,6 +45,15 @@ def main() -> int:
 
     log.info("Config summary: %s", cfg.summary())
 
+    risk = RiskManager.from_config(cfg.risk, cfg.trading.max_leverage)
+    log.info(
+        "Risk: equity=$%.2f | per-trade cap=$%.2f | max exposure=$%.2f | "
+        "stop=-%.1f%% tp=+%.1f%% | min_conf=%.2f",
+        risk.account_equity_usd, risk.per_trade_cap_usd, risk.max_exposure_usd,
+        cfg.risk.stop_loss_frac * 100, cfg.risk.take_profit_frac * 100,
+        risk.min_signal_confidence,
+    )
+
     try:
         data = HyperliquidData()
     except MarketDataError as exc:
@@ -56,8 +69,7 @@ def main() -> int:
     for coin in cfg.trading.markets:
         try:
             df = data.fetch_daily(
-                coin,
-                lookback_days=200,
+                coin, lookback_days=200,
                 drop_incomplete=cfg.trading.only_completed_candles,
             )
         except MarketDataError as exc:
@@ -76,20 +88,28 @@ def main() -> int:
             displacement=cfg.ichimoku.displacement,
         )
         last = ich.iloc[-1]
+        price = float(last["close"])
         result = evaluate_signals(ich, cfg.risk.min_signal_confidence)
 
         log.info("%-6s | %s close=%.4f | %s | %s",
-                 coin, last["time"].date(), last["close"], cloud_position(last),
-                 result.summary())
+                 coin, last["time"].date(), price, cloud_position(last), result.summary())
 
-        # History scan: how often each signal fired across the available candles.
+        # Risk layer: a real sized decision if an entry fired, else a sizing preview.
+        if result.entry_recommended:
+            decision = risk.size_position(coin, price, result.confidence, current_exposure_usd=0.0)
+            log.info("         %s ENTRY DECISION: %s", coin, decision.summary())
+        else:
+            preview = risk.size_position(coin, price, confidence=1.0, current_exposure_usd=0.0)
+            log.info("         %s risk preview (hypothetical, no live entry signal): %s",
+                     coin, preview.summary())
+
         flags = signals_per_row(ich)
         hist = " ".join(f"{name}={int(flags[name].sum())}" for name in ALL_SIGNALS)
         log.info("         %s history over %d candles: %s", coin, len(ich), hist)
 
         analyzed += 1
 
-    log.info("Milestone 4a OK: evaluated signals for %d/%d markets.",
+    log.info("Milestone 5 OK: risk-checked signals for %d/%d markets.",
              analyzed, len(cfg.trading.markets))
     log.info("=" * 60)
     return 0 if analyzed > 0 else 1
