@@ -8,26 +8,34 @@
 - Milestone 5: turn entry recommendations into respectively sized, risk-checked decisions 
 - Milestone 6: run the dry-run executor. Open/track/close paper positions, persisted to
 data/positions.json
+- Milestone 7: engine/scheduler loop. main module modified to be a thin launcher
+
+Pass --loop to keep a single long-running process that wakes shortly after 00:00 UTC
               
 
-Entries/exits are only assessed, sized and logged only. Places no orders atm
+Dry run: places no orders atm
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 
 from ichibot.config import ConfigError, load_config
+from ichibot.engine import Engine
 from ichibot.executor_dryrun import DryRunExecutor, ExecutorError, PositionStore
-from ichibot.ichimoku import cloud_position, compute_ichimoku, min_required_candles 
 from ichibot.logging_setup import setup_logging
 from ichibot.market_data import HyperliquidData, MarketDataError
 from ichibot.risk import RiskManager
-from ichibot.signals import ALL_SIGNALS, evaluate_signals, signals_per_row
 
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="ichibot -- Ichimoku dry-run trading bot")
+    parser.add_argument("--loop", action="store_true",
+                        help="run continuously, once shortly after each 00:00 UTC")
+    args = parser.parse_args()
+
     log = setup_logging()
     log.info("=" * 60)
     log.info("ichibot starting up")
@@ -63,7 +71,7 @@ def main() -> int:
     except ExecutorError as exc:
         log.error("Could not load paper positions: %s", exc)
         return 1
-    log.info("Loaded %d open paper position(s) from %s", len(executor.positions), store.path)
+    log.info("Loaded %d open paper position(s).", len(executor.positions))
 
     try:
         data = HyperliquidData()
@@ -72,51 +80,22 @@ def main() -> int:
         log.error("Check your internet connection and try again. Exiting.")
         return 1
 
-    needed = min_required_candles(cfg.ichimoku.span_b_periods, cfg.ichimoku.displacement)
-    log.info("Scanning %d market(s); need >= %d candles per market.",
-             len(cfg.trading.markets), needed)
+    engine = Engine(cfg, data, executor, log)
 
-    analyzed = 0
-    for coin in cfg.trading.markets:
+    if args.loop:
         try:
-            df = data.fetch_daily(
-                coin, lookback_days=200,
-                drop_incomplete=cfg.trading.only_completed_candles,
-            )
-        except MarketDataError as exc:
-            log.warning("Skipping %s: %s", coin, exc)
-            continue
+            engine.run_forever()
+        except KeyboardInterrupt:
+            log.info("Scheduler loop stopped by user.")
+    else:
+        engine.run_once()
+        log.info("Paper book: %d open | exposure $%.2f / $%.2f | session realized PnL $%.2f",
+                 len(executor.positions), executor.current_exposure_usd(),
+                 risk.max_exposure_usd, executor.realized_pnl)
 
-        if len(df) < needed:
-            log.warning("%s: only %d candles, need %d -- skipping.", coin, len(df), needed)
-            continue
-
-        ich = compute_ichimoku(
-            df,
-            conversion_periods=cfg.ichimoku.conversion_periods,
-            base_periods=cfg.ichimoku.base_periods,
-            span_b_periods=cfg.ichimoku.span_b_periods,
-            displacement=cfg.ichimoku.displacement,
-        )
-        last = ich.iloc[-1]
-        price = float(last["close"])
-        result = evaluate_signals(ich, cfg.risk.min_signal_confidence)
-        held = "HELD" if coin in executor.positions else "flat"
-
-        log.info("%-6s | %s close=%.4f | %s | %s | %s",
-                 coin, last["time"].date(), price, cloud_position(last), held, result.summary())
-
-        executor.process(coin, price, result)   # logs its own open/hold/close lines
-        analyzed += 1
-
-    executor.commit()
-    log.info("Paper book: %d open | exposure $%.2f / $%.2f | session realized PnL $%.2f",
-             len(executor.positions), executor.current_exposure_usd(),
-             risk.max_exposure_usd, executor.realized_pnl)
-    log.info("Milestone 6 OK: dry-run executor ran for %d/%d markets.",
-             analyzed, len(cfg.trading.markets))
+    log.info("Milestone 7 OK.")
     log.info("=" * 60)
-    return 0 if analyzed > 0 else 1
+    return 0
 
 
 if __name__ == "__main__":

@@ -118,3 +118,27 @@ def test_corrupt_positions_file_raises(tmp_path):
 def test_live_executor_refuses_to_construct():
     with pytest.raises(NotImplementedError):
         LiveExecutor()
+
+
+""" Option to add date_opened to data/positions.json
+
+def test_date_opened_and_persists(tmp_path):
+    store = PositionStore(str(tmp_path / "positions.json"))
+    rm = RiskManager()
+    ex = DryRunExecutor(rm, log, store=store)
+    ex.process("BTC", 100.0, _entry_sig(ts=pd.Timestamp("2026-06-19", tz=UTC)))
+    assert ex.positions["BTC"].date_opened == "2026-06-19"
+    ex.commit()
+    ex2 = DryRunExecutor(rm, log, store=store)
+    assert ex2.positions["BTC"].date_opened == "2026-06-19" 
+
+def test_date_opened_falls_back_when_no_timestamp():
+    ex = DryRunExecutor(RiskManager(), log)
+    ex.process("BTC", 100.0, _entry_sig(ts=None))
+    assert ex.positions["BTC"].date_opened != ""
+
+populate date_opened in positions.json: 
+- set min_signal_confidence: 0.0 in config_yaml
+- restore min_signal_confidence: 0.6 
+- rm data/positions.json
+"""
