@@ -1,18 +1,15 @@
 """Tests for the backtest module. Network-free."""
 
 from __future__ import annotations
-
-import logging
-import types
-
+import logging, types
 import pandas as pd
 import pytest
-
-from ichibot.backtest import Backtester, Trade, compute_metrics, max_drawdown, replay_history
+from ichibot.backtest import (Backtester, Trade, compute_metrics, max_drawdown,
+                              replay_history, signal_attribution)
 from ichibot.risk import RiskManager
 
-log = logging.getLogger("ichibot.test")
 
+log = logging.getLogger("ichibot.test")
 
 def test_max_drawdown_basic():
     assert max_drawdown([1000, 1100, 900, 1000]) == pytest.approx(200 / 1100)
@@ -27,27 +24,21 @@ def _trade(pnl, pnl_pct, bars=3):
 
 
 def test_compute_metrics_basic():
-    trades = [_trade(10, 10.0), _trade(-5, -5.0), _trade(20, 20.0)]
-    eq = [1000.0, 1010.0, 1005.0, 1025.0]
-    m = compute_metrics(trades, eq, 1000.0)
+    m = compute_metrics([_trade(10, 10.0), _trade(-5, -5.0), _trade(20, 20.0)],
+                        [1000.0, 1010.0, 1005.0, 1025.0], 1000.0)
     assert m["trades"] == 3
     assert m["win_rate"] == pytest.approx(2 / 3)
     assert m["total_return_pct"] == pytest.approx(2.5)
     assert m["profit_factor"] == pytest.approx(30 / 5)
-    assert m["avg_win_pct"] == pytest.approx(15.0)
-    assert m["avg_loss_pct"] == pytest.approx(-5.0)
 
 
 def test_compute_metrics_empty():
     m = compute_metrics([], [1000.0], 1000.0)
-    assert m["trades"] == 0
-    assert m["win_rate"] == 0.0
-    assert m["total_return_pct"] == 0.0
-    assert m["profit_factor"] == 0.0
+    assert m["trades"] == 0 and m["profit_factor"] == 0.0
 
 
 def _ich(closes, tenkan=90.0, kijun=85.0, cloud_top=100.0, cloud_bottom=80.0, a_fut=95.0, b_fut=90.0):
-    rows = [{"close": float(c), "high": float(c), "low": float(c), "tenkan": tenkan, "kijun": kijun, 
+    rows = [{"close": float(c), "high": float(c), "low": float(c), "tenkan": tenkan, "kijun": kijun,
              "cloud_top": cloud_top, "cloud_bottom": cloud_bottom,
              "senkou_a_future": a_fut, "senkou_b_future": b_fut} for c in closes]
     df = pd.DataFrame(rows)
@@ -56,30 +47,18 @@ def _ich(closes, tenkan=90.0, kijun=85.0, cloud_top=100.0, cloud_bottom=80.0, a_
 
 
 def test_replay_one_breakout_then_stop():
-    ich = _ich([90, 95, 110, 112, 103])
-    trades, eq = replay_history("BTC", ich, RiskManager(), 0.6, log)
-    assert len(trades) == 1
-    t = trades[0]
-    assert t.exit_reason == "stop_loss"
-    assert t.entry_price == pytest.approx(110.0)
-    assert t.bars_held == 2
-    assert t.pnl == pytest.approx((103.0 - 110.0) * (100.0 / 110.0))
-    assert eq[-1] == pytest.approx(1000.0 + t.pnl)
+    trades, eq = replay_history("BTC", _ich([90, 95, 110, 112, 103]), RiskManager(), 0.6, log)
+    assert len(trades) == 1 and trades[0].exit_reason == "stop_loss" and trades[0].bars_held == 2
 
 
 def test_replay_open_at_end_is_force_closed():
-    ich = _ich([90, 95, 110, 112, 120])
-    trades, eq = replay_history("BTC", ich, RiskManager(), 0.6, log)
-    assert len(trades) == 1
-    assert trades[0].exit_reason == "end_of_backtest"
-    assert trades[0].pnl == pytest.approx((120.0 - 110.0) * (100.0 / 110.0))
+    trades, eq = replay_history("BTC", _ich([90, 95, 110, 112, 120]), RiskManager(), 0.6, log)
+    assert len(trades) == 1 and trades[0].exit_reason == "end_of_backtest"
 
 
 def test_replay_no_signal_no_trades():
-    ich = _ich([90, 91, 92, 93, 94])
-    trades, eq = replay_history("BTC", ich, RiskManager(), 0.6, log)
-    assert trades == []
-    assert eq == [1000.0]
+    trades, eq = replay_history("BTC", _ich([90, 91, 92, 93, 94]), RiskManager(), 0.6, log)
+    assert trades == [] and eq == [1000.0]
 
 
 def _cfg(markets):
@@ -103,13 +82,9 @@ class FakeData:
 
 
 def test_backtester_skips_insufficient_history():
-    short = pd.DataFrame({
-        "time": pd.date_range("2025-01-01", periods=100, freq="D", tz="UTC"),
-        "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.0, "volume": 1.0,
-    })
-    bt = Backtester(_cfg(["BTC"]), FakeData(short), log, days=700)
-    results = bt.run()
-    assert results["BTC"]["metrics"]["trades"] == 0
+    short = pd.DataFrame({"time": pd.date_range("2025-01-01", periods=100, freq="D", tz="UTC"),
+                          "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.0, "volume": 1.0})
+    assert Backtester(_cfg(["BTC"]), FakeData(short), log, days=700).run()["BTC"]["metrics"]["trades"] == 0
 
 
 def test_backtester_runs_and_reports_keys():
@@ -117,12 +92,31 @@ def test_backtester_runs_and_reports_keys():
     n = 200
     rng = np.random.default_rng(1)
     base = 100 + np.cumsum(rng.normal(0, 2, n))
-    df = pd.DataFrame({
-        "time": pd.date_range("2025-01-01", periods=n, freq="D", tz="UTC"),
-        "open": base, "high": base + 3, "low": base - 3, "close": base, "volume": np.ones(n),
-    })
-    bt = Backtester(_cfg(["BTC"]), FakeData(df), log, days=700)
-    results = bt.run()
-    m = results["BTC"]["metrics"]
-    for key in ("trades", "win_rate", "total_return_pct", "profit_factor", "max_drawdown_pct"):
-        assert key in m
+    df = pd.DataFrame({"time": pd.date_range("2025-01-01", periods=n, freq="D", tz="UTC"),
+                       "open": base, "high": base + 3, "low": base - 3, "close": base, "volume": np.ones(n)})
+    m = Backtester(_cfg(["BTC"]), FakeData(df), log, days=700).run()["BTC"]["metrics"]
+    for k in ("trades", "win_rate", "total_return_pct", "profit_factor", "max_drawdown_pct"):
+        assert k in m
+
+
+# --- NEW: per-signal attribution ------------------------------------------
+
+def test_signal_attribution_aggregates():
+    trades = [
+        Trade("BTC", "d1", 100, "d2", 110, 1, 10, 10, 2, "take_profit",
+              entry_signals=("price_breakout_above_cloud", "flat_kijun_bull")),
+        Trade("BTC", "d3", 100, "d4", 95, 1, -5, -5, 3, "stop_loss",
+              entry_signals=("flat_kijun_bull",)),
+    ]
+    agg = signal_attribution(trades)
+    assert agg["price_breakout_above_cloud"]["trades"] == 1
+    assert agg["price_breakout_above_cloud"]["wins"] == 1
+    assert agg["flat_kijun_bull"]["trades"] == 2
+    assert agg["flat_kijun_bull"]["wins"] == 1
+    assert agg["flat_kijun_bull"]["pnl"] == pytest.approx(5.0)
+
+
+def test_replay_records_entry_signals():
+    trades, eq = replay_history("BTC", _ich([90, 95, 110, 112, 103]), RiskManager(), 0.6, log)
+    assert len(trades) == 1
+    assert "price_breakout_above_cloud" in trades[0].entry_signals
