@@ -46,8 +46,9 @@ def test_compute_metrics_empty():
     assert m["profit_factor"] == 0.0
 
 
-def _ich(closes, tenkan=90.0, kijun=85.0, cloud_top=100.0, a_fut=95.0, b_fut=90.0):
-    rows = [{"close": float(c), "tenkan": tenkan, "kijun": kijun, "cloud_top": cloud_top,
+def _ich(closes, tenkan=90.0, kijun=85.0, cloud_top=100.0, cloud_bottom=80.0, a_fut=95.0, b_fut=90.0):
+    rows = [{"close": float(c), "high": float(c), "low": float(c), "tenkan": tenkan, "kijun": kijun, 
+             "cloud_top": cloud_top, "cloud_bottom": cloud_bottom,
              "senkou_a_future": a_fut, "senkou_b_future": b_fut} for c in closes]
     df = pd.DataFrame(rows)
     df["time"] = pd.date_range("2025-01-01", periods=len(rows), freq="D", tz="UTC")
