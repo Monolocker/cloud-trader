@@ -59,8 +59,8 @@ class PatternParams:
     flat_tol: float = 0.0015
     touch_tol: float = 0.0025
     convincing_margin: float = 0.0025
-    # --- overextension exit (Tenkan-Kijun gap percentile) ---
-    use_overextension_exit: bool = False   # toggle for A/B testing
+    # --- overextension exit (Tenkan-Kijun gap percentile, currently [OFF]) ---
+    use_overextension_exit: bool = False  # toggle for A/B testing
     overext_lookback: int = 60            # window for "recent history"
     overext_percentile: float = 0.90      # exit when gap exceeds this percentile of its history
 
