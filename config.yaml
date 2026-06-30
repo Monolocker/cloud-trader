@@ -20,7 +20,7 @@ risk:
   max_capital_per_trade_frac: 0.10        # <= 10% of equity per single trade 
   max_portfolio_exposure_frac: 0.50       # <- 50% of equity deployed at once
   stop_loss_frac: 0.05                    # exit if 5% below entry
-  take_profit_frac: 0.15                  # take profit at +15% (0 disables)
+  take_profit_frac: 0.0                   # disabled, was 0.15; bearish sigs + overextension now exit 
   use_trailing_stop: false 
   trailing_stop_frac: 0.07
   min_signal_confidence: 0.6              # 0..1: ignore weaker signals
