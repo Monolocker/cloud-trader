@@ -15,8 +15,12 @@ Run:  python -m ichibot.backtest --days 700
 """
 
 from __future__ import annotations
+import json
 import logging
-from dataclasses import dataclass
+import math
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
 
 from ichibot.executor_dryrun import DryRunExecutor
 from ichibot.ichimoku import compute_ichimoku, min_required_candles
@@ -36,7 +40,7 @@ class Trade:
     pnl_pct: float
     bars_held: int
     exit_reason: str
-    entry_signals: tuple = ()      # which bullish signals fired at entry
+    entry_signals: tuple = ()
 
 
 def max_drawdown(equity_curve):
@@ -64,8 +68,6 @@ def compute_metrics(trades, equity_curve, start_equity):
 
 
 def signal_attribution(trades):
-    """Per-entry-signal tally. A trade counts toward EVERY bullish signal that
-    fired at its entry, so pnl is shared and columns can sum to more than the total."""
     agg = {}
     for t in trades:
         for sig in t.entry_signals:
@@ -136,38 +138,80 @@ class Backtester:
         return r
 
 
-def _print_report(results, start_equity, days):
-    print(f"\nBacktest over ~{days} candles per market "
-          f"(each simulated independently with a ${start_equity:,.0f} account)")
-    print("Past performance does not predict future results.\n")
+def _format_report(results, start_equity, days) -> str:
+    lines = [f"Backtest over ~{days} candles per market "
+             f"(each simulated independently with a ${start_equity:,.0f} account)",
+             "Past performance does not predict future results.", ""]
     header = f"{'MARKET':<7}{'TRADES':>7}{'WIN%':>7}{'RET%':>8}{'AVGW%':>7}{'AVGL%':>7}{'PF':>6}{'MAXDD%':>8}{'BARS':>6}"
-    print(header); print("-" * len(header))
+    lines += [header, "-" * len(header)]
     all_trades = []
     for coin, r in results.items():
         m = r["metrics"]; all_trades.extend(r["trades"])
         pf = "inf" if m["profit_factor"] == float("inf") else f"{m['profit_factor']:.2f}"
-        print(f"{coin:<7}{m['trades']:>7}{m['win_rate']*100:>7.0f}{m['total_return_pct']:>8.2f}"
-              f"{m['avg_win_pct']:>7.2f}{m['avg_loss_pct']:>7.2f}{pf:>6}{m['max_drawdown_pct']:>8.2f}"
-              f"{m['avg_bars_held']:>6.0f}")
+        lines.append(f"{coin:<7}{m['trades']:>7}{m['win_rate']*100:>7.0f}{m['total_return_pct']:>8.2f}"
+                     f"{m['avg_win_pct']:>7.2f}{m['avg_loss_pct']:>7.2f}{pf:>6}{m['max_drawdown_pct']:>8.2f}"
+                     f"{m['avg_bars_held']:>6.0f}")
     n = len(all_trades); wins = sum(1 for t in all_trades if t.pnl > 0); total = sum(t.pnl for t in all_trades)
-    print("-" * len(header))
-    print(f"POOLED: {n} trades, {wins} wins ({(wins/n*100) if n else 0:.0f}% win rate), "
-          f"total PnL ${total:.2f} (per-market independent accounts)\n")
+    lines += ["-" * len(header),
+              f"POOLED: {n} trades, {wins} wins ({(wins/n*100) if n else 0:.0f}% win rate), "
+              f"total PnL ${total:.2f} (per-market independent accounts)"]
+    return "\n".join(lines)
 
 
-def _print_attribution(results):
+def _format_attribution(results) -> str:
     all_trades = []
     for r in results.values():
         all_trades.extend(r["trades"])
     agg = signal_attribution(all_trades)
-    print("Entry-signal attribution (a trade counts toward every bullish signal that fired")
-    print("at entry; pnl is shared, so columns can sum to more than the pooled total):\n")
+    lines = ["", "Entry-signal attribution (a trade counts toward every bullish signal that fired",
+             "at entry; pnl is shared, so columns can sum to more than the pooled total):", ""]
     header = f"{'SIGNAL':<28}{'TRADES':>7}{'WINS':>6}{'WIN%':>7}{'PNL$':>9}"
-    print(header); print("-" * len(header))
-    for sig, a in sorted(agg.items(), key=lambda kv: kv[1]["pnl"]):   # worst (most diluting) first
+    lines += [header, "-" * len(header)]
+    for sig, a in sorted(agg.items(), key=lambda kv: kv[1]["pnl"]):
         wr = (a["wins"] / a["trades"] * 100) if a["trades"] else 0
-        print(f"{sig:<28}{a['trades']:>7}{a['wins']:>6}{wr:>7.0f}{a['pnl']:>9.2f}")
-    print()
+        lines.append(f"{sig:<28}{a['trades']:>7}{a['wins']:>6}{wr:>7.0f}{a['pnl']:>9.2f}")
+    return "\n".join(lines)
+
+
+def _report_text(results, start_equity, days) -> str:
+    return _format_report(results, start_equity, days) + "\n" + _format_attribution(results)
+
+
+def _run_filename(days: int, ext: str, now: datetime | None = None) -> str:
+    """Filesystem-safe result filename: backtest_<YYYY-MM-DD>_<HHMM>_<days>d.<ext>.
+    No colons (some filesystems reject them). `now` is injectable for testing."""
+    now = now or datetime.now()
+    return f"backtest_{now:%Y-%m-%d_%H%M}_{days}d.{ext}"
+
+
+def _json_safe_metrics(m: dict) -> dict:
+    """Replace non-finite floats (e.g. profit_factor == inf) with None for valid JSON."""
+    return {k: (None if isinstance(v, float) and not math.isfinite(v) else v) for k, v in m.items()}
+
+
+def save_results(results, start_equity, days, out_dir="results"):
+    """Write a timestamped .txt (human) and .json (machine) pair. Returns (txt_path, json_path)."""
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    now = datetime.now()
+    txt_path = out / _run_filename(days, "txt", now)
+    json_path = out / _run_filename(days, "json", now)
+
+    txt_path.write_text(_report_text(results, start_equity, days), encoding="utf-8")
+
+    all_trades = []
+    payload = {"generated_at": now.isoformat(), "days": days,
+               "start_equity": start_equity, "markets": {}}
+    for coin, r in results.items():
+        payload["markets"][coin] = {
+            "metrics": _json_safe_metrics(r["metrics"]),
+            "trades": [asdict(t) for t in r["trades"]],
+        }
+        all_trades.extend(r["trades"])
+    payload["attribution"] = signal_attribution(all_trades)
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    return txt_path, json_path
 
 
 def main() -> int:
@@ -191,8 +235,9 @@ def main() -> int:
         print(f"Market data unavailable: {exc}"); return 1
 
     results = Backtester(cfg, data, log, days=args.days).run()
-    _print_report(results, cfg.risk.account_equity_usd, args.days)
-    _print_attribution(results)
+    print(_report_text(results, cfg.risk.account_equity_usd, args.days))
+    txt_path, json_path = save_results(results, cfg.risk.account_equity_usd, args.days)
+    print(f"\nSaved: {txt_path}\n       {json_path}")
     return 0
 
 

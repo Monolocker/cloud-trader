@@ -174,7 +174,7 @@ def test_params_are_tunable():
 
 
 # --- overextension exit ---------------------------------------------------
-_OE = PatternParams(overext_lookback=5, overext_percentile=0.90)
+_OE = PatternParams(overext_lookback=5, overext_percentile=0.90, use_overextension_exit = True)
 
 
 def test_overextension_fires_on_extreme_gap():

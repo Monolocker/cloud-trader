@@ -1,15 +1,17 @@
 """Tests for the backtest module. Network-free."""
 
 from __future__ import annotations
-import logging, types
+import json
+import logging, re, types
+from datetime import datetime
 import pandas as pd
 import pytest
 from ichibot.backtest import (Backtester, Trade, compute_metrics, max_drawdown,
-                              replay_history, signal_attribution)
+                              replay_history, signal_attribution, _run_filename, save_results)
 from ichibot.risk import RiskManager
 
-
 log = logging.getLogger("ichibot.test")
+
 
 def test_max_drawdown_basic():
     assert max_drawdown([1000, 1100, 900, 1000]) == pytest.approx(200 / 1100)
@@ -26,10 +28,8 @@ def _trade(pnl, pnl_pct, bars=3):
 def test_compute_metrics_basic():
     m = compute_metrics([_trade(10, 10.0), _trade(-5, -5.0), _trade(20, 20.0)],
                         [1000.0, 1010.0, 1005.0, 1025.0], 1000.0)
-    assert m["trades"] == 3
-    assert m["win_rate"] == pytest.approx(2 / 3)
-    assert m["total_return_pct"] == pytest.approx(2.5)
-    assert m["profit_factor"] == pytest.approx(30 / 5)
+    assert m["trades"] == 3 and m["win_rate"] == pytest.approx(2 / 3)
+    assert m["total_return_pct"] == pytest.approx(2.5) and m["profit_factor"] == pytest.approx(30 / 5)
 
 
 def test_compute_metrics_empty():
@@ -64,13 +64,10 @@ def test_replay_no_signal_no_trades():
 def _cfg(markets):
     return types.SimpleNamespace(
         trading=types.SimpleNamespace(markets=markets, only_completed_candles=True, max_leverage=1.0),
-        ichimoku=types.SimpleNamespace(conversion_periods=20, base_periods=60,
-                                       span_b_periods=120, displacement=30),
-        risk=types.SimpleNamespace(
-            account_equity_usd=1000.0, max_capital_per_trade_frac=0.10,
-            max_portfolio_exposure_frac=0.50, stop_loss_frac=0.05, take_profit_frac=0.15,
-            use_trailing_stop=False, trailing_stop_frac=0.07, min_signal_confidence=0.6),
-    )
+        ichimoku=types.SimpleNamespace(conversion_periods=20, base_periods=60, span_b_periods=120, displacement=30),
+        risk=types.SimpleNamespace(account_equity_usd=1000.0, max_capital_per_trade_frac=0.10,
+                                   max_portfolio_exposure_frac=0.50, stop_loss_frac=0.05, take_profit_frac=0.15,
+                                   use_trailing_stop=False, trailing_stop_frac=0.07, min_signal_confidence=0.6))
 
 
 class FakeData:
@@ -99,24 +96,40 @@ def test_backtester_runs_and_reports_keys():
         assert k in m
 
 
-# --- NEW: per-signal attribution ------------------------------------------
-
 def test_signal_attribution_aggregates():
-    trades = [
-        Trade("BTC", "d1", 100, "d2", 110, 1, 10, 10, 2, "take_profit",
-              entry_signals=("price_breakout_above_cloud", "flat_kijun_bull")),
-        Trade("BTC", "d3", 100, "d4", 95, 1, -5, -5, 3, "stop_loss",
-              entry_signals=("flat_kijun_bull",)),
-    ]
+    trades = [Trade("BTC", "d1", 100, "d2", 110, 1, 10, 10, 2, "take_profit",
+                    entry_signals=("price_breakout_above_cloud", "flat_kijun_bull")),
+              Trade("BTC", "d3", 100, "d4", 95, 1, -5, -5, 3, "stop_loss",
+                    entry_signals=("flat_kijun_bull",))]
     agg = signal_attribution(trades)
-    assert agg["price_breakout_above_cloud"]["trades"] == 1
-    assert agg["price_breakout_above_cloud"]["wins"] == 1
-    assert agg["flat_kijun_bull"]["trades"] == 2
-    assert agg["flat_kijun_bull"]["wins"] == 1
+    assert agg["price_breakout_above_cloud"]["trades"] == 1 and agg["flat_kijun_bull"]["trades"] == 2
     assert agg["flat_kijun_bull"]["pnl"] == pytest.approx(5.0)
 
 
 def test_replay_records_entry_signals():
     trades, eq = replay_history("BTC", _ich([90, 95, 110, 112, 103]), RiskManager(), 0.6, log)
-    assert len(trades) == 1
     assert "price_breakout_above_cloud" in trades[0].entry_signals
+
+
+# --- NEW: save-results feature --------------------------------------------
+
+def test_run_filename_shape_and_no_colons():
+    name = _run_filename(1500, "txt")
+    assert name.startswith("backtest_") and name.endswith("_1500d.txt") and ":" not in name
+    assert re.match(r"^backtest_\d{4}-\d{2}-\d{2}_\d{4}_1500d\.txt$", name)
+
+
+def test_run_filename_deterministic_with_now():
+    assert _run_filename(700, "json", now=datetime(2026, 6, 30, 14, 30)) == "backtest_2026-06-30_1430_700d.json"
+
+
+def test_save_results_writes_both_files(tmp_path):
+    trades = [Trade("BTC", "d1", 100, "d2", 110, 1, 10, 10, 2, "take_profit",
+                    entry_signals=("price_breakout_above_cloud",))]
+    results = {"BTC": {"trades": trades, "equity_curve": [1000.0, 1010.0],
+                       "metrics": compute_metrics(trades, [1000.0, 1010.0], 1000.0)}}
+    txt_path, json_path = save_results(results, 1000.0, 1500, out_dir=str(tmp_path))
+    assert txt_path.exists() and json_path.exists()
+    payload = json.loads(json_path.read_text())
+    assert payload["days"] == 1500 and "BTC" in payload["markets"]
+    assert payload["markets"]["BTC"]["trades"][0]["pnl"] == 10

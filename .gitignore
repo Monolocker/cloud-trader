@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# Virtual environments 
+.venv/
+
+# Environment variables 
+.env
+
+
+logs/*
+!logs/.gitkeep
+data/*
+!data/.gitkeep
+
+# Backtesting results 
+results/
