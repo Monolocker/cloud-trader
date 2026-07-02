@@ -121,19 +121,20 @@ class Backtester:
                                    drop_incomplete=self.cfg.trading.only_completed_candles)
         se = self.cfg.risk.account_equity_usd
         if len(df) < self.needed:
-            return [], [se]
+            return [], [se], 0.0
         ich = compute_ichimoku(df, conversion_periods=self.cfg.ichimoku.conversion_periods,
                                base_periods=self.cfg.ichimoku.base_periods,
                                span_b_periods=self.cfg.ichimoku.span_b_periods,
                                displacement=self.cfg.ichimoku.displacement)
         risk = RiskManager.from_config(self.cfg.risk, self.cfg.trading.max_leverage)
-        return replay_history(coin, ich, risk, self.cfg.risk.min_signal_confidence, self.log)
+        trades, eq = replay_history(coin, ich, risk, self.cfg.risk.min_signal_confidence, self.log)
+        return trades, eq, buy_and_hold_return_pct(ich)
 
     def run(self):
         r = {}
         for c in self.cfg.trading.markets:
-            t, e = self.run_market(c)
-            r[c] = {"trades": t, "equity_curve": e,
+            t, e, bh = self.run_market(c)
+            r[c] = {"trades": t, "equity_curve": e, "buy_hold_pct": bh,
                     "metrics": compute_metrics(t, e, self.cfg.risk.account_equity_usd)}
         return r
 
@@ -142,13 +143,17 @@ def _format_report(results, start_equity, days) -> str:
     lines = [f"Backtest over ~{days} candles per market "
              f"(each simulated independently with a ${start_equity:,.0f} account)",
              "Past performance does not predict future results.", ""]
-    header = f"{'MARKET':<7}{'TRADES':>7}{'WIN%':>7}{'RET%':>8}{'AVGW%':>7}{'AVGL%':>7}{'PF':>6}{'MAXDD%':>8}{'BARS':>6}"
+    header = (f"{'MARKET':<7}{'TRADES':>7}{'WIN%':>7}{'RET%':>8}{'BH%':>8}{'EDGE%':>8}"
+              f"{'AVGW%':>7}{'AVGL%':>7}{'PF':>6}{'MAXDD%':>8}{'BARS':>6}")
     lines += [header, "-" * len(header)]
     all_trades = []
     for coin, r in results.items():
         m = r["metrics"]; all_trades.extend(r["trades"])
+        bh = r["buy_hold_pct"]
+        edge = m["total_return_pct"] - bh
         pf = "inf" if m["profit_factor"] == float("inf") else f"{m['profit_factor']:.2f}"
         lines.append(f"{coin:<7}{m['trades']:>7}{m['win_rate']*100:>7.0f}{m['total_return_pct']:>8.2f}"
+                     f"{bh:>8.2f}{edge:>8.2f}"
                      f"{m['avg_win_pct']:>7.2f}{m['avg_loss_pct']:>7.2f}{pf:>6}{m['max_drawdown_pct']:>8.2f}"
                      f"{m['avg_bars_held']:>6.0f}")
     n = len(all_trades); wins = sum(1 for t in all_trades if t.pnl > 0); total = sum(t.pnl for t in all_trades)
@@ -240,6 +245,18 @@ def main() -> int:
     print(f"\nSaved: {txt_path}\n       {json_path}")
     return 0
 
+def buy_and_hold_return_pct(ich) -> float:
+    """Return % of buying at the first tradeable candle and holding to the last.
+    Measured over the SAME window the strategy trades (after the warmup NaNs),
+    so it's an apples-to-apples benchmark."""
+    valid = ich[ich["cloud_top"].notna()]
+    if len(valid) < 2:
+        return 0.0
+    first = float(valid.iloc[0]["close"])
+    last = float(valid.iloc[-1]["close"])
+    if first <= 0:
+        return 0.0
+    return (last / first - 1.0) * 100.0
 
 if __name__ == "__main__":
     raise SystemExit(main())

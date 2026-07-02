@@ -7,7 +7,7 @@ from datetime import datetime
 import pandas as pd
 import pytest
 from ichibot.backtest import (Backtester, Trade, compute_metrics, max_drawdown,
-                              replay_history, signal_attribution, _run_filename, save_results)
+                              replay_history, signal_attribution, _run_filename, save_results, buy_and_hold_return_pct)
 from ichibot.risk import RiskManager
 
 log = logging.getLogger("ichibot.test")
@@ -91,10 +91,16 @@ def test_backtester_runs_and_reports_keys():
     base = 100 + np.cumsum(rng.normal(0, 2, n))
     df = pd.DataFrame({"time": pd.date_range("2025-01-01", periods=n, freq="D", tz="UTC"),
                        "open": base, "high": base + 3, "low": base - 3, "close": base, "volume": np.ones(n)})
-    m = Backtester(_cfg(["BTC"]), FakeData(df), log, days=700).run()["BTC"]["metrics"]
+    result = Backtester(_cfg(["BTC"]), FakeData(df), log, days=700).run()["BTC"]
+    assert "buy_hold_pct" in result
+    m = result["metrics"]
     for k in ("trades", "win_rate", "total_return_pct", "profit_factor", "max_drawdown_pct"):
         assert k in m
 
+def test_buy_and_hold_return():
+    # first valid close 100 -> last 150 == +50%; warmup NaN rows are excluded
+    ich = _ich([90, 95, 110, 112, 150])
+    assert buy_and_hold_return_pct(ich) == pytest.approx((150 / 90 - 1) * 100)
 
 def test_signal_attribution_aggregates():
     trades = [Trade("BTC", "d1", 100, "d2", 110, 1, 10, 10, 2, "take_profit",
@@ -127,6 +133,7 @@ def test_save_results_writes_both_files(tmp_path):
     trades = [Trade("BTC", "d1", 100, "d2", 110, 1, 10, 10, 2, "take_profit",
                     entry_signals=("price_breakout_above_cloud",))]
     results = {"BTC": {"trades": trades, "equity_curve": [1000.0, 1010.0],
+                       "buy_hold_pct": 12.5,
                        "metrics": compute_metrics(trades, [1000.0, 1010.0], 1000.0)}}
     txt_path, json_path = save_results(results, 1000.0, 1500, out_dir=str(tmp_path))
     assert txt_path.exists() and json_path.exists()
