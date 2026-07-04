@@ -205,3 +205,49 @@ def test_overextension_triggers_exit_recommended():
     rows = [{"tenkan": 101, "kijun": 100} for _ in range(5)] + [{"tenkan": 120, "kijun": 100}]
     r = evaluate_signals(_frame(rows), 0.6, params=_OE)
     assert r.exit_recommended and SIG_OVEREXTENDED in r.bearish_signals
+
+
+# --- exit suppression ------------------------------------------------------
+def _regime_rows(prev_close, cur_close, tenkan, kijun, cloud_top, a_fut=60.0, b_fut=55.0):
+    base = {"cloud_bottom": 80.0, "senkou_a_future": a_fut, "senkou_b_future": b_fut}
+    return [{"close": prev_close, "tenkan": tenkan, "kijun": kijun, "cloud_top": cloud_top, **base},
+            {"close": cur_close, "tenkan": tenkan, "kijun": kijun, "cloud_top": cloud_top, **base}]
+
+
+def test_tenkan_exit_suppressed_in_uptrend():
+    r = _eval(_regime_rows(101, 95, tenkan=100, kijun=90, cloud_top=88))
+    assert not r.exit_recommended and SIG_BELOW_TENKAN not in r.bearish_signals
+
+
+def test_tenkan_exit_honored_when_regime_off():
+    r = _eval(_regime_rows(101, 95, tenkan=100, kijun=90, cloud_top=200))
+    assert r.exit_recommended and SIG_BELOW_TENKAN in r.bearish_signals
+
+
+def test_kijun_break_honored_in_uptrend():
+    r = _eval(_regime_rows(101, 88, tenkan=95, kijun=90, cloud_top=85))
+    assert r.exit_recommended
+    assert SIG_BELOW_KIJUN in r.bearish_signals
+    assert SIG_BELOW_TENKAN not in r.bearish_signals
+
+
+def test_pattern_bear_not_suppressed_in_uptrend():
+    rows = [{"close": 103, "tenkan": 101, "kijun": 100, "cloud_top": 90, "cloud_bottom": 80, "senkou_a_future": 60, "senkou_b_future": 55},
+            {"close": 103, "tenkan": 101, "kijun": 100, "cloud_top": 90, "cloud_bottom": 80, "senkou_a_future": 60, "senkou_b_future": 55},
+            {"close": 102, "tenkan": 101, "kijun": 100, "cloud_top": 90, "cloud_bottom": 80, "senkou_a_future": 60, "senkou_b_future": 55},
+            {"close": 100.5, "tenkan": 101, "kijun": 100, "cloud_top": 90, "cloud_bottom": 80, "senkou_a_future": 60, "senkou_b_future": 55}]
+    r = evaluate_signals(_frame(rows), 0.6)
+    assert r.exit_recommended
+    assert SIG_CCLAMP_BEAR in r.bearish_signals
+    assert SIG_BELOW_TENKAN not in r.bearish_signals
+
+
+def test_suppression_toggle_off():
+    r = _eval(_regime_rows(101, 95, tenkan=100, kijun=90, cloud_top=88),
+              params=PatternParams(suppress_tenkan_exit_in_uptrend=False))
+    assert r.exit_recommended and SIG_BELOW_TENKAN in r.bearish_signals
+
+
+def test_suppression_needs_all_three_regime_conditions():
+    r = _eval(_regime_rows(101, 95, tenkan=100, kijun=90, cloud_top=88, a_fut=55, b_fut=60))
+    assert r.exit_recommended and SIG_BELOW_TENKAN in r.bearish_signals

@@ -1,10 +1,12 @@
 """Signal detection for the Ichimoku strategy.
 
 4a: five core crossing signals.
-4b: three pattern signals (edge-to-edge, C-clamp, flat-Kijun), bullish entry + bearish exit.
-Exit milestone: a TK overextension exit strategy. Fires when the gap between Tenkan
-and Kijun is wider than its own recent history, i.e. price has stretched
-too far above equilibrium. Exit-only; sells into strength before the structure breaks.
+4b: three pattern signals, bullish entry + bearish exit.
+Exit milestone: Tenkan-Kijun overextension exit (shelved -- off by default).
+Continuation milestone: continuation_bull re-entry within an established uptrend.
+Exit-suppression milestone: while an uptrend is confirmed, ignore the shallow
+  price_below_tenkan exit (noise), but still honor price_below_kijun, the pattern
+  bears, and -- downstream, in the RiskManager -- the hard stop-loss (never suppressed).
 """
 
 from __future__ import annotations
@@ -26,11 +28,12 @@ SIG_E2E_BEAR = "edge_to_edge_bear"
 SIG_CCLAMP_BEAR = "c_clamp_bear"
 SIG_FLAT_KIJUN_BEAR = "flat_kijun_bear"
 
-SIG_OVEREXTENDED = "tenkan_kijun_overextended"   # exit-only overextension signal
+SIG_OVEREXTENDED = "tenkan_kijun_overextended"
+SIG_CONTINUATION_BULL = "continuation_bull"
 
 BULLISH_SIGNALS = (
     SIG_CLOUD_BREAKOUT, SIG_TK_CROSS_BULL, SIG_KUMO_TWIST_BULL,
-    SIG_FLAT_KIJUN_BULL, SIG_CCLAMP_BULL, SIG_E2E_BULL,
+    SIG_FLAT_KIJUN_BULL, SIG_CCLAMP_BULL, SIG_E2E_BULL, SIG_CONTINUATION_BULL,
 )
 BEARISH_SIGNALS = (
     SIG_BELOW_TENKAN, SIG_BELOW_KIJUN,
@@ -41,6 +44,7 @@ ALL_SIGNALS = BULLISH_SIGNALS + BEARISH_SIGNALS
 
 PRIMARY_BULLISH = frozenset({
     SIG_CLOUD_BREAKOUT, SIG_TK_CROSS_BULL, SIG_FLAT_KIJUN_BULL, SIG_CCLAMP_BULL,
+    SIG_CONTINUATION_BULL,
 })
 
 REQUIRED_COLUMNS = (
@@ -48,10 +52,11 @@ REQUIRED_COLUMNS = (
     "cloud_top", "cloud_bottom", "senkou_a_future", "senkou_b_future",
 )
 
+_REGIME_COL = "_uptrend_regime"   # internal helper column, not a tradeable signal
+
 
 @dataclass
 class PatternParams:
-    """Fuzzy thresholds. Tune against the backtest."""
     e2e_min_cloud_frac: float = 0.005
     cclamp_depth_frac: float = 0.003
     cclamp_min_bars: int = 3
@@ -59,10 +64,15 @@ class PatternParams:
     flat_tol: float = 0.0015
     touch_tol: float = 0.0025
     convincing_margin: float = 0.0025
-    # --- overextension exit (Tenkan-Kijun gap percentile, currently [OFF]) ---
-    use_overextension_exit: bool = False  # toggle for A/B testing
-    overext_lookback: int = 60            # window for "recent history"
-    overext_percentile: float = 0.90      # exit when gap exceeds this percentile of its history
+    use_overextension_exit: bool = False
+    overext_lookback: int = 60
+    overext_percentile: float = 0.90
+    continuation_reference_lookback: int = 60
+    continuation_reference_pct: float = 0.75
+    continuation_recent_lookback: int = 10
+    continuation_touch_tol: float = 0.0025
+    # Exit suppression: in a confirmed uptrend, ignore the shallow Tenkan-dip exit.
+    suppress_tenkan_exit_in_uptrend: bool = True
 
 
 @dataclass
@@ -73,12 +83,14 @@ class SignalWeights:
     flat_kijun: float = 0.55
     c_clamp: float = 0.5
     e2e: float = 0.4
+    continuation: float = 0.6
 
     def weight_for(self, name: str) -> float:
         return {
             SIG_CLOUD_BREAKOUT: self.cloud_breakout, SIG_TK_CROSS_BULL: self.tk_cross,
             SIG_KUMO_TWIST_BULL: self.kumo_twist, SIG_FLAT_KIJUN_BULL: self.flat_kijun,
             SIG_CCLAMP_BULL: self.c_clamp, SIG_E2E_BULL: self.e2e,
+            SIG_CONTINUATION_BULL: self.continuation,
         }.get(name, 0.0)
 
 
@@ -109,6 +121,7 @@ def signals_per_row(ich: pd.DataFrame, params: PatternParams | None = None) -> p
     close, high, low = ich["close"], ich["high"], ich["low"]
     tenkan, kijun = ich["tenkan"], ich["kijun"]
     ct, cb = ich["cloud_top"], ich["cloud_bottom"]
+    sa_fut, sb_fut = ich["senkou_a_future"], ich["senkou_b_future"]
 
     def cross_above(a, b):
         return (a.shift(1) <= b.shift(1)) & (a > b)
@@ -119,7 +132,7 @@ def signals_per_row(ich: pd.DataFrame, params: PatternParams | None = None) -> p
     out = pd.DataFrame(index=ich.index)
     out[SIG_TK_CROSS_BULL] = cross_above(tenkan, kijun)
     out[SIG_CLOUD_BREAKOUT] = cross_above(close, ct)
-    out[SIG_KUMO_TWIST_BULL] = cross_above(ich["senkou_a_future"], ich["senkou_b_future"])
+    out[SIG_KUMO_TWIST_BULL] = cross_above(sa_fut, sb_fut)
     out[SIG_BELOW_TENKAN] = cross_below(close, tenkan)
     out[SIG_BELOW_KIJUN] = cross_below(close, kijun)
 
@@ -147,10 +160,6 @@ def signals_per_row(ich: pd.DataFrame, params: PatternParams | None = None) -> p
     out[SIG_FLAT_KIJUN_BEAR] = (flat & (close <= kijun * (1 - params.convincing_margin))
                                 & ((high >= kijun * (1 - params.touch_tol)) | (close.shift(1) >= kijun.shift(1))))
 
-    # --- Tenkan-Kijun overextension exit -----------------------------------
-    # gap as a fraction of Kijun, so "Tenkan 15% above Kijun" == 0.15. Fire when the
-    # current gap is strictly above the Nth percentile of its own recent history AND
-    # positive (an UPSIDE stretch). Strict '>' so a steady gap doesn't fire every bar.
     gap = (tenkan - kijun) / kijun
     roll_q = gap.rolling(params.overext_lookback).quantile(params.overext_percentile)
     overext = (gap > 0) & (gap > roll_q)
@@ -158,12 +167,27 @@ def signals_per_row(ich: pd.DataFrame, params: PatternParams | None = None) -> p
         overext = pd.Series(False, index=ich.index)
     out[SIG_OVEREXTENDED] = overext
 
+    # Uptrend regime: price above cloud, Tenkan above Kijun, future cloud bullish.
+    # Single source of truth -- used by BOTH continuation re-entry and exit suppression.
+    regime = (close > ct) & (tenkan > kijun) & (sa_fut > sb_fut)
+    out[_REGIME_COL] = regime
+
+    dist = (close - tenkan) / tenkan
+    recent_peak = dist.shift(1).rolling(params.continuation_recent_lookback).max()
+    reference_q = dist.shift(1).rolling(params.continuation_reference_lookback).quantile(params.continuation_reference_pct)
+    extended_recently = recent_peak >= reference_q
+    touched = low <= tenkan * (1 + params.continuation_touch_tol)
+    reclaim = close > tenkan
+    out[SIG_CONTINUATION_BULL] = regime & extended_recently & touched & reclaim
+
     return out.fillna(False).astype(bool)
 
 
 def evaluate_signals(ich, min_confidence, weights=None, params=None):
     if weights is None:
         weights = SignalWeights()
+    if params is None:
+        params = PatternParams()
     has_time = "time" in ich.columns
     if len(ich) < 2:
         ts = ich.iloc[-1]["time"] if (len(ich) == 1 and has_time) else None
@@ -173,6 +197,14 @@ def evaluate_signals(ich, min_confidence, weights=None, params=None):
     fired = {name: bool(last[name]) for name in ALL_SIGNALS}
     bullish = [n for n in BULLISH_SIGNALS if fired[n]]
     bearish = [n for n in BEARISH_SIGNALS if fired[n]]
+
+    # Exit suppression: in a confirmed uptrend, drop only the shallow Tenkan-dip exit.
+    # The hard stop-loss lives in the RiskManager and is never seen here, so it is
+    # structurally impossible for this to weaken capital protection.
+    regime_up = bool(last[_REGIME_COL])
+    if params.suppress_tenkan_exit_in_uptrend and regime_up and SIG_BELOW_TENKAN in bearish:
+        bearish = [b for b in bearish if b != SIG_BELOW_TENKAN]
+
     confidence = min(1.0, sum(weights.weight_for(n) for n in bullish))
     entry = confidence >= min_confidence and any(n in PRIMARY_BULLISH for n in bullish)
     ts = ich.iloc[-1]["time"] if has_time else None
