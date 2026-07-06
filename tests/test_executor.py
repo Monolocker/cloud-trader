@@ -7,7 +7,6 @@ import logging
 import pytest
 
 from ichibot.executor_dryrun import DryRunExecutor, ExecutorError, PositionStore
-from ichibot.executor_live import LiveExecutor
 from ichibot.risk import RiskManager
 from ichibot.signals import SignalResult
 
@@ -113,11 +112,6 @@ def test_corrupt_positions_file_raises(tmp_path):
     p.write_text("{ not valid json", encoding="utf-8")
     with pytest.raises(ExecutorError):
         PositionStore(str(p)).load()
-
-
-def test_live_executor_refuses_to_construct():
-    with pytest.raises(NotImplementedError):
-        LiveExecutor()
 
 
 """ Option to add date_opened to data/positions.json

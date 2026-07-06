@@ -12,6 +12,7 @@ import pytest
 
 from ichibot.engine import Engine, seconds_until_next_utc_run
 
+
 log = logging.getLogger("ichibot.test")
 
 
@@ -55,6 +56,8 @@ class FakeExecutor:
     def commit(self):
         self.commits += 1
 
+    def reconcile(self):
+        return None
 
 def test_run_once_processes_each_market(tmp_path):
     ex = FakeExecutor()
