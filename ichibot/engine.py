@@ -69,6 +69,7 @@ class Engine:
         self.needed = min_required_candles(cfg.ichimoku.span_b_periods, cfg.ichimoku.displacement)
 
     def run_once(self) -> dict:
+        self.executor.reconcile()   # M8: halt-and-alert before touching any market
         state = self.state_store.load()
         last_processed = state.get("last_processed", {})
         summary = {"processed": [], "skipped_dup": [], "skipped_other": [], "actions": {}}

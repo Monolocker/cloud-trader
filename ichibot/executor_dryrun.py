@@ -130,3 +130,7 @@ class DryRunExecutor:
         """Persist current paper positions (no-op if constructed without a store)."""
         if self.store:
             self.store.save(self.positions)
+
+    def reconcile(self):
+        """No-op: dry-run has no exchange state to reconcile against."""
+        return None
