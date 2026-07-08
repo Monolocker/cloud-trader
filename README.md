@@ -10,24 +10,24 @@ This is a personal, educational project built to learn/strengthen software engin
 
 ## What it is / what it is not 
 **It is:** 
-    - A rule-based (non-ML) strategy engine with a full backtester 
-    - A dry-run-by-default bot that paper-trades and persists state locally
-    - A live executor for Hyperliquid perps, gated behind multiple independent safety layers
-    - A test-covered codebase (~120 tests) built over the course of major/minor milestones
+- A rule-based (non-ML) strategy engine with a full backtester 
+- A dry-run-by-default bot that paper-trades and persists state locally
+- A live executor for Hyperliquid perps, gated behind multiple independent safety layers
+- A test-covered codebase (~120 tests) built over the course of major/minor milestones
 
 **It is NOT:** 
-    - A money-making guarantee, a signal service, or financial advice
-    - A high-frequency or leveraged system. Trades 1d, 1x
-    - Production-hardened infrastructure. It is a learning project, run and reviewed by hand
+- A money-making guarantee, a signal service, or financial advice
+- A high-frequency or leveraged system. Trades 1d, 1x
+- Production-hardened infrastructure. It is a learning project, run and reviewed by hand
 
 ## Strategy 
 The strategy is a long-only trend-follower built on the Ichimoku cloud. The following are subject to change:
-    - **Indicator:** Ichimoku Cloud with "doubled" settings. Conversion `20`, base `60`, Span B `120`, displacement `30`. Applied to daily candles
-    - **Direction:** Long-only 
-    - **Leverage:** 1x
-    - **Markets:** BTC, ETH, SOL, HYPE perpetuals
-    - **Signals:** 5 core signals, including additional pattern signals, and a continuation re-entry signal
-    - **Exits:** Structural bearish signals, including a hard stop-loss enforced independently by the risk manager
+- **Indicator:** Ichimoku Cloud with "doubled" settings. Conversion `20`, base `60`, Span B `120`, displacement `30`. Applied to daily candles
+- **Direction:** Long-only 
+- **Leverage:** 1x
+- **Markets:** BTC, ETH, SOL, HYPE perpetuals
+- **Signals:** 5 core signals, including additional pattern signals, and a continuation re-entry signal
+- **Exits:** Structural bearish signals, including a hard stop-loss enforced independently by the risk manager
 
 ## Validated Profile 
 The strategy has been backtested across multiple markets and time samples with a buy-and-hold benchmark for context. Its character is defensive: it is a risk-managed trend-follower that sits in cash when signals are absent, caps exposure per position, and prioritizes capital preservation in down and choppy markets. It has shown small max drawdowns (roughly 2–5%) relative to holding the underlying assets through the same periods in such market environments.
