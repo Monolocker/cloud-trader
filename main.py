@@ -44,7 +44,7 @@ def _build_live_executor(cfg, risk, store, log, args):
     base_url = constants.TESTNET_API_URL if args.testnet else constants.MAINNET_API_URL
     network = "TESTNET" if args.testnet else "MAINNET (REAL MONEY)"
 
-    wallet = Account.from_key(cfg.agent_private_key)          # AGENT key signs   <-- rename if needed
+    wallet = Account.from_key(cfg.private_key)          # AGENT key signs   <-- rename if needed
     exchange = Exchange(wallet, base_url, account_address=cfg.account_address)   # MAIN address owns
     info = Info(base_url, skip_ws=True)
     sz_decimals = {u["name"]: u["szDecimals"] for u in info.meta()["universe"]}
@@ -83,8 +83,9 @@ def main() -> int:
     log.info("=" * 60)
     log.info("ichibot starting up")
 
+    env_file = ".env.testnet" if args.testnet else ".env"
     try:
-        cfg = load_config("Config.yaml", ".env")
+        cfg = load_config("Config.yaml", env_file)
     except ConfigError as exc:
         log.error("Configuration error: %s", exc)
         log.error("Fix Config.yaml / .env and try again. Exiting.")
@@ -104,6 +105,9 @@ def main() -> int:
         log.warning("!" * 60)
     else:
         log.info("Mode: DRY RUN. No real orders will ever be placed.")
+
+    if want_live and args.testnet: 
+        log.warning("[LIVE] Testnet execution, but candle data from mainnet.")
 
     log.info("Config summary: %s", cfg.summary())
 
