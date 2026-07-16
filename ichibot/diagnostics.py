@@ -1,4 +1,4 @@
-"""v1.5: Signal-occurrence diagnostics (Layer 0: measurement only, no behavior change).
+"""Signal-occurrence diagnostics (Layer 0: measurement only, no behavior change).
 
 The backtest's attribution table counts signals attached to EXECUTED entries.
 That conflates three different questions:
@@ -30,11 +30,10 @@ from ichibot.ichimoku import compute_ichimoku, min_required_candles
 from ichibot.risk import RiskManager
 from ichibot.signals import (
     ALL_SIGNALS,
-    BULLISH_SIGNALS,
     PRIMARY_BULLISH,
     SIG_KUMO_TWIST_BULL,
-    SignalResult,
     SignalWeights,
+    result_from_flags,
     signals_per_row,
 )
 
@@ -121,15 +120,11 @@ def diagnose_market(
     for i in range(1, len(ich)):
         row = ich.iloc[i]
         f = flags.iloc[i]
-        bullish = [s for s in BULLISH_SIGNALS if f[s]]
-        bearish = [s for s in ALL_SIGNALS if s not in BULLISH_SIGNALS and f[s]]
-        confidence = min(1.0, sum(weights.weight_for(s) for s in bullish))
+        sig = result_from_flags(f, row.get("time"), min_confidence, weights)
+        bullish, bearish, confidence = sig.bullish_signals, sig.bearish_signals, sig.confidence
         primaries = [s for s in bullish if s in PRIMARY_BULLISH]
-        entry = bool(primaries) and confidence >= min_confidence
         flat_before = coin not in ex.positions
 
-        sig = SignalResult(row.get("time"), bullish, bearish, confidence,
-                           entry, len(bearish) > 0, {})
         action = ex.process(coin, float(row["close"]), sig)
         opened = action == "opened"
 

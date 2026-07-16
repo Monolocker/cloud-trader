@@ -160,20 +160,29 @@ def signals_per_row(ich: pd.DataFrame, params: PatternParams | None = None) -> p
 
     return out.fillna(False).astype(bool)
 
-
-def evaluate_signals(ich, min_confidence, weights=None, params=None):
+def result_from_flags(flags_row, timestamp, min_confidence, weights=None) -> SignalResult:
+    """Build a SignalResult from one precomputed row of signals_per_row output.
+ 
+    This is the single home of the entry/exit gating rules (confidence sum,
+    primary-signal requirement, bearish-exit trigger). The live path
+    (evaluate_signals) and the backtest replay (which precomputes flags for
+    the entire history once, then walks rows) both delegate here, so the two
+    code paths cannot diverge.
+    """
     if weights is None:
         weights = SignalWeights()
+    bullish = [n for n in BULLISH_SIGNALS if bool(flags_row[n])]
+    bearish = [n for n in BEARISH_SIGNALS if bool(flags_row[n])]
+    confidence = min(1.0, sum(weights.weight_for(n) for n in bullish))
+    entry = confidence >= min_confidence and any(n in PRIMARY_BULLISH for n in bullish)
+    return SignalResult(timestamp, bullish, bearish, confidence, entry, len(bearish) > 0, {})
+
+
+def evaluate_signals(ich, min_confidence, weights=None, params=None):
     has_time = "time" in ich.columns
     if len(ich) < 2:
         ts = ich.iloc[-1]["time"] if (len(ich) == 1 and has_time) else None
         return SignalResult(ts, [], [], 0.0, False, False, {})
     flags = signals_per_row(ich, params)
-    last = flags.iloc[-1]
-    fired = {name: bool(last[name]) for name in ALL_SIGNALS}
-    bullish = [n for n in BULLISH_SIGNALS if fired[n]]
-    bearish = [n for n in BEARISH_SIGNALS if fired[n]]
-    confidence = min(1.0, sum(weights.weight_for(n) for n in bullish))
-    entry = confidence >= min_confidence and any(n in PRIMARY_BULLISH for n in bullish)
     ts = ich.iloc[-1]["time"] if has_time else None
-    return SignalResult(ts, bullish, bearish, confidence, entry, len(bearish) > 0, {})
+    return result_from_flags(flags.iloc[-1], ts, min_confidence, weights)

@@ -25,7 +25,7 @@ from pathlib import Path
 from ichibot.executor_dryrun import DryRunExecutor
 from ichibot.ichimoku import compute_ichimoku, min_required_candles
 from ichibot.risk import RiskManager
-from ichibot.signals import evaluate_signals
+from ichibot.signals import result_from_flags, signals_per_row
 
 
 @dataclass
@@ -80,15 +80,27 @@ def signal_attribution(trades):
 
 
 def replay_history(coin, ich, risk, min_confidence, logger):
+    """Replay one market bar-by-bar through the live executor pipeline.
+    
+    Signal flags are now computed once over the full history via signals_per_row.
+    Every opertion in that function (rolling windows, shift(1) crossings) is causal.
+    It only looks backwards, thus, row i's flags are iddentical whether computed over
+    ich[:i+1] or over the whole frame. Therefore, replay loop time complexity now becomes
+    O(n) total, instead of the previous O(n^2) derived from rescanning while window grows.
+    This recomputed all signals over an ever-larger slice each bar."""
+
     ex = DryRunExecutor(risk, logger, store=None); start = risk.account_equity_usd
     trades = []; eq = [start]; realized = 0.0; oi = {}
+    flags = signals_per_row(ich)
+    has_time = "time" in ich.columns
 
     def d(row, i):
         return str(row["time"].date()) if "time" in ich.columns else str(i)
 
     for i in range(1, len(ich)):
-        w = ich.iloc[: i + 1]; row = w.iloc[-1]; price = float(row["close"])
-        sig = evaluate_signals(w, min_confidence)
+        row = ich.iloc[1]; price = float(row["close"])
+        ts = row["time"] if has_time else None
+        sig = result_from_flags(flags.iloc[1], ts, min_confidence)
         action = ex.process(coin, price, sig)
         if action == "opened":
             pos = ex.positions[coin]

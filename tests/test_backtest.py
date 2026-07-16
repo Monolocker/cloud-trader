@@ -140,3 +140,77 @@ def test_save_results_writes_both_files(tmp_path):
     payload = json.loads(json_path.read_text())
     assert payload["days"] == 1500 and "BTC" in payload["markets"]
     assert payload["markets"]["BTC"]["trades"][0]["pnl"] == 10
+
+# ---------------------------------------------------------------------------
+# Regression: the O(n) precomputed-flags replay must reproduce the EXACT trade
+# list of the original O(n^2) grow-the-window replay. The reference below is
+# the pre-refactor replay_history body, kept verbatim.
+# ---------------------------------------------------------------------------
+import numpy as np
+
+from ichibot.backtest import Trade, replay_history
+from ichibot.executor_dryrun import DryRunExecutor
+from ichibot.ichimoku import compute_ichimoku
+from ichibot.risk import RiskManager
+from ichibot.signals import evaluate_signals
+
+
+def _reference_replay_incremental(coin, ich, risk, min_confidence, logger):
+    """Pre-refactor replay_history, verbatim (grow-the-window rescan)."""
+    ex = DryRunExecutor(risk, logger, store=None); start = risk.account_equity_usd
+    trades = []; eq = [start]; realized = 0.0; oi = {}
+
+    def d(row, i):
+        return str(row["time"].date()) if "time" in ich.columns else str(i)
+
+    for i in range(1, len(ich)):
+        w = ich.iloc[: i + 1]; row = w.iloc[-1]; price = float(row["close"])
+        sig = evaluate_signals(w, min_confidence)
+        action = ex.process(coin, price, sig)
+        if action == "opened":
+            pos = ex.positions[coin]
+            oi = {"date": d(row, i), "price": pos.entry_price, "size": pos.size_units,
+                  "i": i, "signals": tuple(sig.bullish_signals)}
+        elif action.startswith("closed:"):
+            reason = action.split(":", 1)[1]
+            pnl = (price - oi["price"]) * oi["size"]; pct = (price / oi["price"] - 1) * 100
+            realized += pnl
+            trades.append(Trade(coin, oi["date"], oi["price"], d(row, i), price, oi["size"],
+                                pnl, pct, i - oi["i"], reason, entry_signals=oi["signals"]))
+            eq.append(start + realized)
+
+    if coin in ex.positions:
+        last = ich.iloc[-1]; price = float(last["close"]); ex.close_position(coin, price, "end_of_backtest")
+        pnl = (price - oi["price"]) * oi["size"]; pct = (price / oi["price"] - 1) * 100; realized += pnl
+        trades.append(Trade(coin, oi["date"], oi["price"], d(last, len(ich) - 1), price, oi["size"],
+                            pnl, pct, (len(ich) - 1) - oi["i"], "end_of_backtest", entry_signals=oi["signals"]))
+        eq.append(start + realized)
+    return trades, eq
+
+
+def _synthetic_ich(n=600, seed=42):
+    rng = np.random.default_rng(seed)
+    close = 100 * np.exp(np.cumsum(rng.normal(0.0008, 0.025, n)))
+    df = pd.DataFrame({
+        "time": pd.date_range("2022-01-01", periods=n, freq="D", tz="UTC"),
+        "open": close,
+        "high": close * (1 + rng.uniform(0, 0.012, n)),
+        "low": close * (1 - rng.uniform(0, 0.012, n)),
+        "close": close,
+        "volume": np.ones(n),
+    })
+    return compute_ichimoku(df, conversion_periods=20, base_periods=60,
+                            span_b_periods=120, displacement=30)
+
+
+def test_replay_matches_incremental_reference():
+    log = logging.getLogger("regression"); log.addHandler(logging.NullHandler())
+    for seed in (42, 7, 2024):  # several independent price paths
+        ich = _synthetic_ich(seed=seed)
+        ref_trades, ref_eq = _reference_replay_incremental(
+            "BTC", ich, RiskManager(account_equity_usd=1000.0), 0.6, log)
+        new_trades, new_eq = replay_history(
+            "BTC", ich, RiskManager(account_equity_usd=1000.0), 0.6, log)
+        assert len(ref_trades) > 0, "fixture produced no trades; strengthen it"
+        assert new_trades == ref_trades          # dataclass equality: every field
+        assert new_eq == ref_eq
