@@ -95,12 +95,12 @@ def replay_history(coin, ich, risk, min_confidence, logger):
     has_time = "time" in ich.columns
 
     def d(row, i):
-        return str(row["time"].date()) if "time" in ich.columns else str(i)
+        return str(row["time"].date()) if has_time else str(i)
 
     for i in range(1, len(ich)):
-        row = ich.iloc[1]; price = float(row["close"])
+        row = ich.iloc[i]; price = float(row["close"])
         ts = row["time"] if has_time else None
-        sig = result_from_flags(flags.iloc[1], ts, min_confidence)
+        sig = result_from_flags(flags.iloc[i], ts, min_confidence)
         action = ex.process(coin, price, sig)
         if action == "opened":
             pos = ex.positions[coin]
