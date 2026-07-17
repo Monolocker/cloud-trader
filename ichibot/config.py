@@ -52,10 +52,33 @@ class RiskConfig:
 
 
 @dataclass
+class FeesConfig:
+    """Per-trade exchange fees as fractions of notional (0.00045 == 0.045%).
+
+    Used by the BACKTEST only; live fees are charged by the exchange itself.
+    A missing `fees:` section in config.yaml means zero fees, which keeps
+    pre-fee backtest results bit-identical (legacy comparison mode).
+    """
+    taker_fee_rate: float = 0.0
+    maker_fee_rate: float = 0.0
+    entry_is_taker: bool = True   # the bot sends market orders upon entry
+    exit_is_taker: bool = True    # and exit
+
+    @property
+    def entry_rate(self) -> float:
+        return self.taker_fee_rate if self.entry_is_taker else self.maker_fee_rate
+
+    @property
+    def exit_rate(self) -> float:
+        return self.taker_fee_rate if self.exit_is_taker else self.maker_fee_rate
+
+
+@dataclass
 class AppConfig:
     trading: TradingConfig
     ichimoku: IchimokuConfig
     risk: RiskConfig
+    fees: FeesConfig
     enable_live_trading: bool
     private_key: str | None
     account_address: str | None
@@ -76,6 +99,7 @@ class AppConfig:
             "max_capital_per_trade_frac": self.risk.max_capital_per_trade_frac,
             "max_portfolio_exposure_frac": self.risk.max_portfolio_exposure_frac,
             "min_signal_confidence": self.risk.min_signal_confidence,
+            "fees": (self.fees.taker_fee_rate, self.fees.maker_fee_rate),
             "has_private_key": bool(self.private_key),
             "account_address": self.account_address,
         }
@@ -109,7 +133,7 @@ def _check_frac(name: str, value: float, *, allow_zero: bool = True) -> None:
 # --- Loader ----------------------------------------------------------------
 
 
-def load_config(yaml_path: str = "Config.yaml", env_path: str | None = ".env") -> AppConfig:
+def load_config(yaml_path: str = "config.yaml", env_path: str | None = ".env") -> AppConfig:
     """Load and validate configuration. Raises ConfigError on any problem."""
     # 1) Load secrets / mode flags from .env if present (real env vars win).
     if env_path and Path(env_path).exists():
@@ -131,6 +155,7 @@ def load_config(yaml_path: str = "Config.yaml", env_path: str | None = ".env") -
     t = _require(raw, "trading", "root")
     i = _require(raw, "ichimoku", "root")
     r = _require(raw, "risk", "root")
+    f = raw.get("fees") or {}  # optional: absent section == zero fees
 
     cfg = AppConfig(
         trading=TradingConfig(
@@ -155,6 +180,12 @@ def load_config(yaml_path: str = "Config.yaml", env_path: str | None = ".env") -
             trailing_stop_frac=float(_require(r, "trailing_stop_frac", "risk")),
             min_signal_confidence=float(_require(r, "min_signal_confidence", "risk")),
         ),
+        fees=FeesConfig(
+            taker_fee_rate=float(f.get("taker_fee_rate", 0.0)),
+            maker_fee_rate=float(f.get("maker_fee_rate", 0.0)),
+            entry_is_taker=bool(f.get("entry_is_taker", True)),
+            exit_is_taker=bool(f.get("exit_is_taker", True)),
+        ),
         enable_live_trading=_env_bool("ENABLE_LIVE_TRADING", default=False),
         private_key=os.getenv("HYPERLIQUID_PRIVATE_KEY"),
         account_address=os.getenv("HYPERLIQUID_ACCOUNT_ADDRESS"),
@@ -167,6 +198,10 @@ def load_config(yaml_path: str = "Config.yaml", env_path: str | None = ".env") -
 def _validate(cfg: AppConfig) -> None:
     """Enforce safety and sanity rules. Raises ConfigError on the first problem."""
     tr, ic, rk = cfg.trading, cfg.ichimoku, cfg.risk
+
+    # Fees (sanity: a per-side fee at or above 100% of notional is nonsense)
+    _check_frac("fees.taker_fee_rate", cfg.fees.taker_fee_rate)
+    _check_frac("fees.maker_fee_rate", cfg.fees.maker_fee_rate)
 
     # Trading
     if not isinstance(tr.markets, list) or not tr.markets:

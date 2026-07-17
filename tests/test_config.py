@@ -81,3 +81,34 @@ def test_live_trading_requires_keys(tmp_path, monkeypatch):
     monkeypatch.delenv("HYPERLIQUID_ACCOUNT_ADDRESS", raising=False)
     with pytest.raises(ConfigError, match="HYPERLIQUID_PRIVATE_KEY"):
         load_config(_write(tmp_path, VALID_YAML), env_path=None)
+
+
+def test_missing_fees_section_defaults_to_zero(tmp_path, monkeypatch):
+    monkeypatch.delenv("ENABLE_LIVE_TRADING", raising=False)
+    cfg = load_config(_write(tmp_path, VALID_YAML), env_path=None)
+    assert cfg.fees.taker_fee_rate == 0.0 and cfg.fees.maker_fee_rate == 0.0
+
+
+def test_fees_section_parsed(tmp_path, monkeypatch):
+    monkeypatch.delenv("ENABLE_LIVE_TRADING", raising=False)
+    body = VALID_YAML + """
+fees:
+  taker_fee_rate: 0.00045
+  maker_fee_rate: 0.00015
+  entry_is_taker: true
+  exit_is_taker: false
+"""
+    cfg = load_config(_write(tmp_path, body), env_path=None)
+    assert cfg.fees.taker_fee_rate == 0.00045
+    assert cfg.fees.entry_rate == 0.00045      # taker on entry
+    assert cfg.fees.exit_rate == 0.00015       # maker on exit
+
+
+def test_negative_fee_rejected(tmp_path, monkeypatch):
+    monkeypatch.delenv("ENABLE_LIVE_TRADING", raising=False)
+    body = VALID_YAML + """
+fees:
+  taker_fee_rate: -0.001
+"""
+    with pytest.raises(ConfigError):
+        load_config(_write(tmp_path, body), env_path=None)

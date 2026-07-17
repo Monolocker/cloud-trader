@@ -41,6 +41,8 @@ class Trade:
     bars_held: int
     exit_reason: str
     entry_signals: tuple = ()
+    gross_pnl: float = 0.0   # PnL before fees; equals pnl when fees are zero
+    fees_paid: float = 0.0   # entry fee + exit fee, in account currency
 
 
 def max_drawdown(equity_curve):
@@ -64,7 +66,9 @@ def compute_metrics(trades, equity_curve, start_equity):
             "avg_win_pct": (sum(t.pnl_pct for t in wins) / len(wins)) if wins else 0.0,
             "avg_loss_pct": (sum(t.pnl_pct for t in losses) / len(losses)) if losses else 0.0,
             "profit_factor": pf, "max_drawdown_pct": max_drawdown(equity_curve) * 100,
-            "avg_bars_held": (sum(t.bars_held for t in trades) / n) if n else 0.0, "final_equity": fe}
+            "avg_bars_held": (sum(t.bars_held for t in trades) / n) if n else 0.0, "final_equity": fe,
+            "gross_pnl": sum(t.gross_pnl for t in trades), "total_fees": sum(t.fees_paid for t in trades),
+            "net_pnl": sum(t.pnl for t in trades)}
 
 
 def signal_attribution(trades):
@@ -79,23 +83,47 @@ def signal_attribution(trades):
     return agg
 
 
-def replay_history(coin, ich, risk, min_confidence, logger):
+def replay_history(coin, ich, risk, min_confidence, logger, fees=None):
     """Replay one market bar-by-bar through the live executor pipeline.
-    
-    Signal flags are now computed once over the full history via signals_per_row.
-    Every opertion in that function (rolling windows, shift(1) crossings) is causal.
-    It only looks backwards, thus, row i's flags are iddentical whether computed over
-    ich[:i+1] or over the whole frame. Therefore, replay loop time complexity now becomes
-    O(n) total, instead of the previous O(n^2) derived from rescanning while window grows.
-    This recomputed all signals over an ever-larger slice each bar."""
 
+    fees: optional FeesConfig. None (or all-zero rates) reproduces fee-free
+    results bit-identically: fee terms enter only as exact IEEE-754
+    subtractions of 0.0. Both fees are charged against realized PnL at close;
+    charging the entry fee at entry time requires per-bar equity accounting
+    and lands with the mark-to-market milestone.
+
+    Signal flags are computed ONCE over the full history via signals_per_row.
+    Every operation in that function (rolling windows, shift(1) crossings) is
+    causal -- it only looks backward -- so row i's flags are identical whether
+    computed over ich[:i+1] or over the whole frame. The replay loop therefore
+    walks precomputed rows: O(n) total, instead of the previous
+    grow-the-window rescan which recomputed all signals over an ever-larger
+    slice each bar (O(n^2) and worse). Equivalence is enforced by
+    tests/test_backtest.py::test_replay_matches_incremental_reference.
+    """
     ex = DryRunExecutor(risk, logger, store=None); start = risk.account_equity_usd
     trades = []; eq = [start]; realized = 0.0; oi = {}
     flags = signals_per_row(ich)
     has_time = "time" in ich.columns
+    entry_rate = fees.entry_rate if fees is not None else 0.0
+    exit_rate = fees.exit_rate if fees is not None else 0.0
 
     def d(row, i):
         return str(row["time"].date()) if has_time else str(i)
+
+    def record_close(exit_date, price, i_now, reason):
+        """Single home of trade-close accounting: loop exits and the
+        end-of-backtest force-close share it so the math cannot drift apart."""
+        nonlocal realized
+        gross = (price - oi["price"]) * oi["size"]
+        fees_paid = oi["entry_fee"] + price * oi["size"] * exit_rate
+        pnl = gross - fees_paid
+        pct = (price / oi["price"] - 1) * 100 - (fees_paid / (oi["price"] * oi["size"])) * 100
+        realized += pnl
+        trades.append(Trade(coin, oi["date"], oi["price"], exit_date, price, oi["size"],
+                            pnl, pct, i_now - oi["i"], reason, entry_signals=oi["signals"],
+                            gross_pnl=gross, fees_paid=fees_paid))
+        eq.append(start + realized)
 
     for i in range(1, len(ich)):
         row = ich.iloc[i]; price = float(row["close"])
@@ -105,21 +133,14 @@ def replay_history(coin, ich, risk, min_confidence, logger):
         if action == "opened":
             pos = ex.positions[coin]
             oi = {"date": d(row, i), "price": pos.entry_price, "size": pos.size_units,
-                  "i": i, "signals": tuple(sig.bullish_signals)}
+                  "i": i, "signals": tuple(sig.bullish_signals),
+                  "entry_fee": pos.entry_price * pos.size_units * entry_rate}
         elif action.startswith("closed:"):
-            reason = action.split(":", 1)[1]
-            pnl = (price - oi["price"]) * oi["size"]; pct = (price / oi["price"] - 1) * 100
-            realized += pnl
-            trades.append(Trade(coin, oi["date"], oi["price"], d(row, i), price, oi["size"],
-                                pnl, pct, i - oi["i"], reason, entry_signals=oi["signals"]))
-            eq.append(start + realized)
+            record_close(d(row, i), price, i, action.split(":", 1)[1])
 
     if coin in ex.positions:
         last = ich.iloc[-1]; price = float(last["close"]); ex.close_position(coin, price, "end_of_backtest")
-        pnl = (price - oi["price"]) * oi["size"]; pct = (price / oi["price"] - 1) * 100; realized += pnl
-        trades.append(Trade(coin, oi["date"], oi["price"], d(last, len(ich) - 1), price, oi["size"],
-                            pnl, pct, (len(ich) - 1) - oi["i"], "end_of_backtest", entry_signals=oi["signals"]))
-        eq.append(start + realized)
+        record_close(d(last, len(ich) - 1), price, len(ich) - 1, "end_of_backtest")
     return trades, eq
 
 
@@ -139,7 +160,8 @@ class Backtester:
                                span_b_periods=self.cfg.ichimoku.span_b_periods,
                                displacement=self.cfg.ichimoku.displacement)
         risk = RiskManager.from_config(self.cfg.risk, self.cfg.trading.max_leverage)
-        trades, eq = replay_history(coin, ich, risk, self.cfg.risk.min_signal_confidence, self.log)
+        trades, eq = replay_history(coin, ich, risk, self.cfg.risk.min_signal_confidence, self.log,
+                                    fees=getattr(self.cfg, "fees", None))
         return trades, eq, buy_and_hold_return_pct(ich)
 
     def run(self):
@@ -169,9 +191,12 @@ def _format_report(results, start_equity, days) -> str:
                      f"{m['avg_win_pct']:>7.2f}{m['avg_loss_pct']:>7.2f}{pf:>6}{m['max_drawdown_pct']:>8.2f}"
                      f"{m['avg_bars_held']:>6.0f}")
     n = len(all_trades); wins = sum(1 for t in all_trades if t.pnl > 0); total = sum(t.pnl for t in all_trades)
+    fees_sum = sum(t.fees_paid for t in all_trades)
+    fee_note = (f" | gross ${total + fees_sum:.2f} - fees ${fees_sum:.2f} = net ${total:.2f}"
+                if fees_sum else "")
     lines += ["-" * len(header),
               f"POOLED: {n} trades, {wins} wins ({(wins/n*100) if n else 0:.0f}% win rate), "
-              f"total PnL ${total:.2f} (per-market independent accounts)"]
+              f"total PnL ${total:.2f} (per-market independent accounts){fee_note}"]
     return "\n".join(lines)
 
 
@@ -243,7 +268,7 @@ def main() -> int:
 
     log = setup_logging(); log.setLevel(logging.WARNING)
     try:
-        cfg = load_config("Config.yaml", ".env")
+        cfg = load_config("config.yaml", ".env")
     except ConfigError as exc:
         print(f"Configuration error: {exc}"); return 1
     try:

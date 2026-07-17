@@ -141,11 +141,10 @@ def test_save_results_writes_both_files(tmp_path):
     assert payload["days"] == 1500 and "BTC" in payload["markets"]
     assert payload["markets"]["BTC"]["trades"][0]["pnl"] == 10
 
-# ---------------------------------------------------------------------------
 # Regression: the O(n) precomputed-flags replay must reproduce the EXACT trade
 # list of the original O(n^2) grow-the-window replay. The reference below is
 # the pre-refactor replay_history body, kept verbatim.
-# ---------------------------------------------------------------------------
+
 import numpy as np
 
 from ichibot.backtest import Trade, replay_history
@@ -212,5 +211,64 @@ def test_replay_matches_incremental_reference():
         new_trades, new_eq = replay_history(
             "BTC", ich, RiskManager(account_equity_usd=1000.0), 0.6, log)
         assert len(ref_trades) > 0, "fixture produced no trades; strengthen it"
-        assert new_trades == ref_trades          # dataclass equality: every field
+        # The reference predates the gross_pnl/fees_paid fields, so compare the
+        # original behavioral fields exactly, then assert the zero-fee
+        # invariants on the new fields.
+        _LEGACY_FIELDS = ("coin", "entry_date", "entry_price", "exit_date", "exit_price",
+                          "size_units", "pnl", "pnl_pct", "bars_held", "exit_reason",
+                          "entry_signals")
+        assert len(new_trades) == len(ref_trades)
+        for new_t, ref_t in zip(new_trades, ref_trades):
+            for fld in _LEGACY_FIELDS:
+                assert getattr(new_t, fld) == getattr(ref_t, fld), fld
+            assert new_t.gross_pnl == new_t.pnl      # zero fees: gross == net
+            assert new_t.fees_paid == 0.0
         assert new_eq == ref_eq
+
+# Fees: hand-calculated math + zero-fee equivalence
+from ichibot.config import FeesConfig
+
+def test_fee_math_hand_calculated():
+    """Entry 110, stop-exit 103, taker 0.1% both sides. Every number below is
+    derivable by hand from the fixture and the 10%-of-$1000 sizing cap."""
+    fees = FeesConfig(taker_fee_rate=0.001, maker_fee_rate=0.0005)
+    trades, eq = replay_history("BTC", _ich([90, 95, 110, 112, 103]),
+                                RiskManager(), 0.6, log, fees=fees)
+    assert len(trades) == 1
+    t = trades[0]
+    size = t.size_units                       # 100 USD cap / 110 = 0.909090...
+    assert size == pytest.approx(100.0 / 110.0)
+    assert t.gross_pnl == pytest.approx((103.0 - 110.0) * size)          # -6.3636
+    expected_fees = 110.0 * size * 0.001 + 103.0 * size * 0.001         #  0.19364
+    assert t.fees_paid == pytest.approx(expected_fees)
+    assert t.pnl == pytest.approx(t.gross_pnl - expected_fees)
+    assert t.pnl_pct == pytest.approx(
+        (103.0 / 110.0 - 1) * 100 - expected_fees / (110.0 * size) * 100)
+    assert eq[-1] == pytest.approx(1000.0 + t.pnl)
+ 
+ 
+def test_maker_rates_used_when_flagged():
+    fees = FeesConfig(taker_fee_rate=0.001, maker_fee_rate=0.0002,
+                      entry_is_taker=False, exit_is_taker=False)
+    trades, _ = replay_history("BTC", _ich([90, 95, 110, 112, 103]),
+                               RiskManager(), 0.6, log, fees=fees)
+    t = trades[0]
+    assert t.fees_paid == pytest.approx((110.0 + 103.0) * t.size_units * 0.0002)
+ 
+ 
+def test_zero_rate_feesconfig_is_bit_identical_to_none():
+    ich = _synthetic_ich(seed=42)
+    a, ea = replay_history("BTC", ich, RiskManager(account_equity_usd=1000.0), 0.6, log,
+                           fees=FeesConfig())
+    b, eb = replay_history("BTC", ich, RiskManager(account_equity_usd=1000.0), 0.6, log,
+                           fees=None)
+    assert a == b and ea == eb   # full dataclass equality, every field
+ 
+ 
+def test_fees_reduce_final_equity():
+    ich = _synthetic_ich(seed=42)
+    _, eq_free = replay_history("BTC", ich, RiskManager(account_equity_usd=1000.0), 0.6, log)
+    trades, eq_fee = replay_history("BTC", ich, RiskManager(account_equity_usd=1000.0), 0.6, log,
+                                    fees=FeesConfig(taker_fee_rate=0.00045))
+    assert eq_fee[-1] < eq_free[-1]
+    assert eq_free[-1] - eq_fee[-1] == pytest.approx(sum(t.fees_paid for t in trades))

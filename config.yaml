@@ -24,3 +24,9 @@ risk:
   use_trailing_stop: false 
   trailing_stop_frac: 0.07
   min_signal_confidence: 0.6              # 0..1: ignore weaker signals
+
+fees:                                     # backtest-only: delete this section for fee-free legacy runs
+  taker_fee_rate: 0.00045                 # 0.045% -- Hyperliquid base-tier taker
+  maker_fee_rate: 0.00015                 # 0.015% -- base-tier maker (unused while both sides are taker)
+  entry_is_taker: true                    # bot sends market orders on entry
+  exit_is_taker: true                     # and on exit
