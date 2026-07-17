@@ -41,14 +41,12 @@ def naive_ichimoku(df: pd.DataFrame, conv: int, base: int, spanb: int, disp: int
 
     senkou_a = [span_a_raw[i - disp] if i - disp >= 0 else math.nan for i in range(n)]
     senkou_b = [span_b_raw[i - disp] if i - disp >= 0 else math.nan for i in range(n)]
-    chikou = [closes[i + disp] if i + disp < n else math.nan for i in range(n)]
 
     return {
         "tenkan": tenkan,
         "kijun": kijun,
         "senkou_a": senkou_a,
         "senkou_b": senkou_b,
-        "chikou": chikou,
     }
 
 

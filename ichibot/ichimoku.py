@@ -9,8 +9,6 @@ Note on displacement:
     sitting under today's price was computed `displacement` bars ago. So to get
     a column whose value at today's row is the cloud beneath today's price, we
     shift the computed span forward: span.shift(displacement).
-  - The Chikou ("lagging") span is the opposite: today's close plotted
-    `displacement` bars BACK, i.e. close.shift(-displacement).
 """
 
 from __future__ import annotations
@@ -54,7 +52,6 @@ def compute_ichimoku(
       senkou_a_future  Leading Span A as computed at this candle (the cloud that
                        will be plotted `displacement` bars ahead) -> twist checks.
       senkou_b_future  Leading Span B as computed at this candle.
-      chikou           Lagging span: close shifted BACK by displacement.
       cloud_top        max(senkou_a, senkou_b) at the current candle.
       cloud_bottom     min(senkou_a, senkou_b) at the current candle.
 
@@ -90,9 +87,6 @@ def compute_ichimoku(
     # Un-shifted leading values: the cloud projected ahead (for twist detection).
     out["senkou_a_future"] = span_a_raw
     out["senkou_b_future"] = span_b_raw
-
-    # Lagging span.
-    out["chikou"] = close.shift(-displacement)
 
     out["cloud_top"] = out[["senkou_a", "senkou_b"]].max(axis=1)
     out["cloud_bottom"] = out[["senkou_a", "senkou_b"]].min(axis=1)

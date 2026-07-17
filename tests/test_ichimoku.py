@@ -60,14 +60,6 @@ def test_senkou_a_is_shifted_forward():
     assert out["senkou_a"].iloc[3] == 8.0
     assert out["senkou_a"].iloc[4] == 9.0
 
-
-def test_chikou_is_shifted_back():
-    out = compute_ichimoku(_df(HIGHS, LOWS, CLOSES), 2, 3, 4, 1)
-    # chikou = close shifted back by 1: chikou[0]=close[1]=9, chikou[4]=NaN
-    assert out["chikou"].iloc[0] == 9.0
-    assert math.isnan(out["chikou"].iloc[4])
-
-
 def test_cloud_bounds_are_min_max_of_spans():
     out = compute_ichimoku(_df(HIGHS, LOWS, CLOSES), 2, 3, 4, 1)
     row = out.iloc[4]
@@ -79,7 +71,7 @@ def test_length_and_columns_preserved():
     df = _df(HIGHS, LOWS, CLOSES)
     out = compute_ichimoku(df, 2, 3, 4, 1)
     assert len(out) == len(df)
-    for col in ("tenkan", "kijun", "senkou_a", "senkou_b", "chikou", "cloud_top", "cloud_bottom"):
+    for col in ("tenkan", "kijun", "senkou_a", "senkou_b", "cloud_top", "cloud_bottom"):
         assert col in out.columns
     # input is not mutated
     assert "tenkan" not in df.columns
