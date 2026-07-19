@@ -41,8 +41,9 @@ class Trade:
     bars_held: int
     exit_reason: str
     entry_signals: tuple = ()
-    gross_pnl: float = 0.0   # PnL before fees; equals pnl when fees are zero
-    fees_paid: float = 0.0   # entry fee + exit fee, in account currency
+    gross_pnl: float = 0.0    # PnL before fees and funding; equals pnl when both are zero
+    fees_paid: float = 0.0    # entry fee + exit fee, in account currency
+    funding_paid: float = 0.0 # accrued funding; positive == cost to the long
 
 
 def max_drawdown(equity_curve):
@@ -68,7 +69,7 @@ def compute_metrics(trades, equity_curve, start_equity):
             "profit_factor": pf, "max_drawdown_pct": max_drawdown(equity_curve) * 100,
             "avg_bars_held": (sum(t.bars_held for t in trades) / n) if n else 0.0, "final_equity": fe,
             "gross_pnl": sum(t.gross_pnl for t in trades), "total_fees": sum(t.fees_paid for t in trades),
-            "net_pnl": sum(t.pnl for t in trades)}
+            "total_funding": sum(t.funding_paid for t in trades), "net_pnl": sum(t.pnl for t in trades)}
 
 
 def signal_attribution(trades):
@@ -87,10 +88,15 @@ def replay_history(coin, ich, risk, min_confidence, logger, fees=None):
     """Replay one market bar-by-bar through the live executor pipeline.
 
     fees: optional FeesConfig. None (or all-zero rates) reproduces fee-free
-    results bit-identically: fee terms enter only as exact IEEE-754
-    subtractions of 0.0. Both fees are charged against realized PnL at close;
-    charging the entry fee at entry time requires per-bar equity accounting
-    and lands with the mark-to-market milestone.
+    trade results bit-identically: fee terms enter only as exact IEEE-754
+    subtractions of 0.0.
+
+    Equity is marked to market on EVERY bar: the returned curve has one point
+    per candle (plus the starting point), valuing any open position at that
+    bar's close, with the entry fee charged the bar it is paid. Bars where the
+    account is flat therefore equal start + realized -- which is exactly the
+    set of points the old close-only curve contained, so the legacy curve is
+    an ordered subsequence of this one (enforced by the regression test).
 
     Signal flags are computed ONCE over the full history via signals_per_row.
     Every operation in that function (rolling windows, shift(1) crossings) is
@@ -107,6 +113,8 @@ def replay_history(coin, ich, risk, min_confidence, logger, fees=None):
     has_time = "time" in ich.columns
     entry_rate = fees.entry_rate if fees is not None else 0.0
     exit_rate = fees.exit_rate if fees is not None else 0.0
+    funding_per_bar_rate = ((fees.funding_rate_8h * fees.funding_periods_per_bar)
+                            if fees is not None else 0.0)
 
     def d(row, i):
         return str(row["time"].date()) if has_time else str(i)
@@ -117,16 +125,21 @@ def replay_history(coin, ich, risk, min_confidence, logger, fees=None):
         nonlocal realized
         gross = (price - oi["price"]) * oi["size"]
         fees_paid = oi["entry_fee"] + price * oi["size"] * exit_rate
-        pnl = gross - fees_paid
-        pct = (price / oi["price"] - 1) * 100 - (fees_paid / (oi["price"] * oi["size"])) * 100
+        pnl = gross - fees_paid - oi["funding"]
+        pct = ((price / oi["price"] - 1) * 100
+               - ((fees_paid + oi["funding"]) / (oi["price"] * oi["size"])) * 100)
         realized += pnl
         trades.append(Trade(coin, oi["date"], oi["price"], exit_date, price, oi["size"],
                             pnl, pct, i_now - oi["i"], reason, entry_signals=oi["signals"],
-                            gross_pnl=gross, fees_paid=fees_paid))
-        eq.append(start + realized)
+                            gross_pnl=gross, fees_paid=fees_paid, funding_paid=oi["funding"]))
 
     for i in range(1, len(ich)):
         row = ich.iloc[i]; price = float(row["close"])
+        # Funding accrues for every bar the position is held AFTER the entry
+        # bar (entry happens at a bar's close, so the position exists through
+        # this bar). Notional proxy: this bar's close * size.
+        if coin in ex.positions:
+            oi["funding"] += funding_per_bar_rate * price * oi["size"]
         ts = row["time"] if has_time else None
         sig = result_from_flags(flags.iloc[i], ts, min_confidence)
         action = ex.process(coin, price, sig)
@@ -134,13 +147,24 @@ def replay_history(coin, ich, risk, min_confidence, logger, fees=None):
             pos = ex.positions[coin]
             oi = {"date": d(row, i), "price": pos.entry_price, "size": pos.size_units,
                   "i": i, "signals": tuple(sig.bullish_signals),
-                  "entry_fee": pos.entry_price * pos.size_units * entry_rate}
+                  "entry_fee": pos.entry_price * pos.size_units * entry_rate,
+                  "funding": 0.0}
         elif action.startswith("closed:"):
             record_close(d(row, i), price, i, action.split(":", 1)[1])
+
+        # Mark to market: one equity point per bar, valuing any open position
+        # at this bar's close and recognizing the entry fee when it is paid.
+        if coin in ex.positions:
+            eq.append(start + realized
+                      + (price - oi["price"]) * oi["size"]
+                      - oi["entry_fee"] - oi["funding"])
+        else:
+            eq.append(start + realized)
 
     if coin in ex.positions:
         last = ich.iloc[-1]; price = float(last["close"]); ex.close_position(coin, price, "end_of_backtest")
         record_close(d(last, len(ich) - 1), price, len(ich) - 1, "end_of_backtest")
+        eq[-1] = start + realized   # final bar re-marked flat: exit fee now realized
     return trades, eq
 
 
@@ -192,8 +216,10 @@ def _format_report(results, start_equity, days) -> str:
                      f"{m['avg_bars_held']:>6.0f}")
     n = len(all_trades); wins = sum(1 for t in all_trades if t.pnl > 0); total = sum(t.pnl for t in all_trades)
     fees_sum = sum(t.fees_paid for t in all_trades)
-    fee_note = (f" | gross ${total + fees_sum:.2f} - fees ${fees_sum:.2f} = net ${total:.2f}"
-                if fees_sum else "")
+    fund_sum = sum(t.funding_paid for t in all_trades)
+    fee_note = (f" | gross ${total + fees_sum + fund_sum:.2f} - fees ${fees_sum:.2f}"
+                f" - funding ${fund_sum:.2f} = net ${total:.2f}"
+                if (fees_sum or fund_sum) else "")
     lines += ["-" * len(header),
               f"POOLED: {n} trades, {wins} wins ({(wins/n*100) if n else 0:.0f}% win rate), "
               f"total PnL ${total:.2f} (per-market independent accounts){fee_note}"]

@@ -30,3 +30,5 @@ fees:                                     # backtest-only: delete this section f
   maker_fee_rate: 0.00015                 # 0.015% -- base-tier maker (unused while both sides are taker)
   entry_is_taker: true                    # bot sends market orders on entry
   exit_is_taker: true                     # and on exit
+  funding_rate_8h: 0.0001                 # Assumed constant 0.01%/8h (~11%/yr)
+  funding_periods_per_bar: 3.0            # three 8h funding events per daily candle

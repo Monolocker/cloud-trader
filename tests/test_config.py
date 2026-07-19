@@ -108,7 +108,22 @@ def test_negative_fee_rejected(tmp_path, monkeypatch):
     monkeypatch.delenv("ENABLE_LIVE_TRADING", raising=False)
     body = VALID_YAML + """
 fees:
-  taker_fee_rate: -0.001
+    taker_fee_rate: -0.001
 """
     with pytest.raises(ConfigError):
         load_config(_write(tmp_path, body), env_path=None)
+
+
+def test_funding_parsed_and_bounded(tmp_path, monkeypatch):
+    monkeypatch.delenv("ENABLE_LIVE_TRADING", raising=False)
+    body = VALID_YAML + """
+fees:
+  funding_rate_8h: 0.0001
+"""
+    cfg = load_config(_write(tmp_path, body), env_path=None)
+    assert cfg.fees.funding_rate_8h == 0.0001
+    with pytest.raises(ConfigError):
+        load_config(_write(tmp_path, VALID_YAML + """
+fees:
+  funding_rate_8h: 0.5
+"""), env_path=None)

@@ -58,7 +58,10 @@ def test_replay_open_at_end_is_force_closed():
 
 def test_replay_no_signal_no_trades():
     trades, eq = replay_history("BTC", _ich([90, 91, 92, 93, 94]), RiskManager(), 0.6, log)
-    assert trades == [] and eq == [1000.0]
+    assert trades == []
+    # Marked-to-market every bar: a flat account is a constant equity line,
+    # one point per candle plus the starting point.
+    assert eq == [1000.0] * len(_ich([90, 91, 92, 93, 94]))
 
 
 def _cfg(markets):
@@ -117,7 +120,7 @@ def test_replay_records_entry_signals():
     assert "price_breakout_above_cloud" in trades[0].entry_signals
 
 
-# --- NEW: save-results feature --------------------------------------------
+# --- save-results feature --------------------------------------------
 
 def test_run_filename_shape_and_no_colons():
     name = _run_filename(1500, "txt")
@@ -223,7 +226,16 @@ def test_replay_matches_incremental_reference():
                 assert getattr(new_t, fld) == getattr(ref_t, fld), fld
             assert new_t.gross_pnl == new_t.pnl      # zero fees: gross == net
             assert new_t.fees_paid == 0.0
-        assert new_eq == ref_eq
+        # Equity contract evolved with mark-to-market: the new curve has one
+        # point per bar; the legacy close-only curve must survive inside it as
+        # an ordered subsequence (flat-after-close bars equal start+realized,
+        # bit-exact), with identical endpoints.
+        assert len(new_eq) == len(ich)
+        assert new_eq[0] == ref_eq[0] and new_eq[-1] == ref_eq[-1]
+        it = iter(new_eq)
+        assert all(any(v == x for x in it) for v in ref_eq), \
+            "legacy equity points missing or out of order in MTM curve"
+
 
 # Fees: hand-calculated math + zero-fee equivalence
 from ichibot.config import FeesConfig
@@ -238,7 +250,7 @@ def test_fee_math_hand_calculated():
     t = trades[0]
     size = t.size_units                       # 100 USD cap / 110 = 0.909090...
     assert size == pytest.approx(100.0 / 110.0)
-    assert t.gross_pnl == pytest.approx((103.0 - 110.0) * size)          # -6.3636
+    assert t.gross_pnl == pytest.approx((103.0 - 110.0) * size)         # -6.3636
     expected_fees = 110.0 * size * 0.001 + 103.0 * size * 0.001         #  0.19364
     assert t.fees_paid == pytest.approx(expected_fees)
     assert t.pnl == pytest.approx(t.gross_pnl - expected_fees)
@@ -272,3 +284,79 @@ def test_fees_reduce_final_equity():
                                     fees=FeesConfig(taker_fee_rate=0.00045))
     assert eq_fee[-1] < eq_free[-1]
     assert eq_free[-1] - eq_fee[-1] == pytest.approx(sum(t.fees_paid for t in trades))
+
+
+# Mark-to-market equity: hand-calculated curve + drawdown honesty 
+
+def test_equity_marked_on_every_bar_hand_calculated():
+    """Fixture closes [90, 95, 110, 112, 103]; entry at 110 (bar 2), stop at
+    103 (bar 4). Every equity point below is derivable by hand."""
+    trades, eq = replay_history("BTC", _ich([90, 95, 110, 112, 103]),
+                                RiskManager(), 0.6, log)
+    s = trades[0].size_units                       # 100/110 units
+    assert len(eq) == 5                            # start + one point per processed bar
+    assert eq[0] == 1000.0                         # start
+    assert eq[1] == 1000.0                         # bar 1: flat
+    assert eq[2] == pytest.approx(1000.0)          # bar 2: entered AT the close -> 0 unrealized
+    assert eq[3] == pytest.approx(1000.0 + (112 - 110) * s)   # bar 3: riding, +$1.818
+    assert eq[4] == pytest.approx(1000.0 + (103 - 110) * s)   # bar 4: stopped, realized
+ 
+ 
+def test_entry_fee_hits_equity_at_entry_bar():
+    fees = FeesConfig(taker_fee_rate=0.001)
+    trades, eq = replay_history("BTC", _ich([90, 95, 110, 112, 103]),
+                                RiskManager(), 0.6, log, fees=fees)
+    s = trades[0].size_units
+    entry_fee = 110.0 * s * 0.001
+    assert eq[2] == pytest.approx(1000.0 - entry_fee)              # fee paid when paid
+    assert eq[3] == pytest.approx(1000.0 + (112 - 110) * s - entry_fee)
+    assert eq[4] == pytest.approx(1000.0 + trades[0].pnl)          # both fees realized
+ 
+ 
+def test_mtm_drawdown_at_least_legacy_drawdown():
+    """The close-only curve hid intra-trade pain; the MTM curve may only ever
+    reveal MORE drawdown, never less."""
+    from ichibot.backtest import max_drawdown
+    for seed in (42, 7, 2024):
+        ich = _synthetic_ich(seed=seed)
+        ref_trades, ref_eq = _reference_replay_incremental(
+            "BTC", ich, RiskManager(account_equity_usd=1000.0), 0.6, log)
+        _, new_eq = replay_history(
+            "BTC", ich, RiskManager(account_equity_usd=1000.0), 0.6, log)
+        assert max_drawdown(new_eq) >= max_drawdown(ref_eq) - 1e-12
+ 
+
+# Funding (assumed constant rate): hand-calculated accrual and sign behavior.
+
+def test_funding_hand_calculated():
+    """Entry at 110 close of bar 2; held through bars 3 and 4. Rate 0.01%/8h,
+    3 periods per daily bar -> 0.03% of notional per held bar."""
+    fees = FeesConfig(funding_rate_8h=0.0001, funding_periods_per_bar=3.0)
+    trades, eq = replay_history("BTC", _ich([90, 95, 110, 112, 103]),
+                                RiskManager(), 0.6, log, fees=fees)
+    t = trades[0]; s = t.size_units
+    expected = 0.0003 * (112.0 * s) + 0.0003 * (103.0 * s)   # bars 3 and 4
+    assert t.funding_paid == pytest.approx(expected)
+    assert t.fees_paid == 0.0
+    assert t.pnl == pytest.approx(t.gross_pnl - expected)
+    # equity path: bar 3 carries one bar of accrual, bar 4 both (realized)
+    assert eq[3] == pytest.approx(1000.0 + (112 - 110) * s - 0.0003 * 112.0 * s)
+    assert eq[4] == pytest.approx(1000.0 + t.pnl)
+ 
+ 
+def test_no_funding_on_entry_bar():
+    """A position opened at bar 2's close held zero hours during bar 2."""
+    fees = FeesConfig(funding_rate_8h=0.0001)
+    trades, eq = replay_history("BTC", _ich([90, 95, 110, 112, 103]),
+                                RiskManager(), 0.6, log, fees=fees)
+    assert eq[2] == pytest.approx(1000.0)   # no entry fee here, and no funding yet
+ 
+ 
+def test_negative_funding_pays_the_long():
+    ich = _ich([90, 95, 110, 112, 103])
+    pos, _ = replay_history("BTC", ich, RiskManager(), 0.6, log,
+                            fees=FeesConfig(funding_rate_8h=0.0001))
+    neg, _ = replay_history("BTC", ich, RiskManager(), 0.6, log,
+                            fees=FeesConfig(funding_rate_8h=-0.0001))
+    assert neg[0].funding_paid == pytest.approx(-pos[0].funding_paid)
+    assert neg[0].pnl > pos[0].pnl

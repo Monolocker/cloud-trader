@@ -55,14 +55,20 @@ class RiskConfig:
 class FeesConfig:
     """Per-trade exchange fees as fractions of notional (0.00045 == 0.045%).
 
-    Used by the BACKTEST only; live fees are charged by the exchange itself.
+    Used by the backtest only; live fees are charged by the exchange itself.
     A missing `fees:` section in config.yaml means zero fees, which keeps
     pre-fee backtest results bit-identical (legacy comparison mode).
     """
     taker_fee_rate: float = 0.0
     maker_fee_rate: float = 0.0
-    entry_is_taker: bool = True   # the bot sends market orders upon entry
-    exit_is_taker: bool = True    # and exit
+    entry_is_taker: bool = True     # the bot sends market orders upon entry
+    exit_is_taker: bool = True      # and exit
+    # Perpetual funding, modeled as an ASSUMED CONSTANT rate (no historical
+    # funding available from daily candles; real funding history arrives 
+    # w/ Binance data provider)
+    # Accrues per bar held after the entry bar, on close * size notional.
+    funding_rate_8h: float = 0.0    # 0.0001 == 0.01%/8h (~11%/yr. reference yaml)
+    funding_periods_per_bar: float = 3.0  # 1d bar contains three 8h periods (reference yaml)
 
     @property
     def entry_rate(self) -> float:
@@ -185,6 +191,8 @@ def load_config(yaml_path: str = "config.yaml", env_path: str | None = ".env") -
             maker_fee_rate=float(f.get("maker_fee_rate", 0.0)),
             entry_is_taker=bool(f.get("entry_is_taker", True)),
             exit_is_taker=bool(f.get("exit_is_taker", True)),
+            funding_rate_8h=float(f.get("funding_rate_8h", 0.0)),
+            funding_periods_per_bar=float(f.get("funding_periods_per_bar", 3.0)),
         ),
         enable_live_trading=_env_bool("ENABLE_LIVE_TRADING", default=False),
         private_key=os.getenv("HYPERLIQUID_PRIVATE_KEY"),
@@ -202,6 +210,13 @@ def _validate(cfg: AppConfig) -> None:
     # Fees (sanity: a per-side fee at or above 100% of notional is nonsense)
     _check_frac("fees.taker_fee_rate", cfg.fees.taker_fee_rate)
     _check_frac("fees.maker_fee_rate", cfg.fees.maker_fee_rate)
+
+    # Funding may be negative (longs get paid); bound its magnitude for sanity
+    if not isinstance(cfg.fees.funding_rate_8h, (int, float)) or abs(cfg.fees.funding_rate_8h) >= 0.01:
+        raise ConfigError(f"'fees.funding_rate_8h' must be a number with |rate| < 0.01"
+                          f"(got {cfg.fees.funding_rate_8h!r})")
+    if cfg.fees.funding_periods_per_bar <= 0:
+        raise ConfigError("'fees.funding_periods_per_bar' must be positive.")
 
     # Trading
     if not isinstance(tr.markets, list) or not tr.markets:
